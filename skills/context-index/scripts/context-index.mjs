@@ -961,7 +961,7 @@ function scaffoldTopic(root, rawName, rawTrigger, opts = {}) {
   const indexRel = `${dirRel}/index.md`;
   const indexFile = join5(root, indexRel);
   if (!existsSync5(indexFile)) {
-    throw new Error(area ? `no ${indexRel} under ${root} - create the area index and list it from a parent index first (scaffold adds INTO an existing index)` : `no context/index.md under ${root} - run the context-index skill's \`setup\` first (scaffold adds INTO an existing index)`);
+    throw new Error(area ? `no ${indexRel} under ${root} - create the area index and list it from a parent index first (scaffold adds INTO an existing index)` : `no context/index.md under ${root} - create it first with a "# Context index" title and an IMPORTANT directive line (scaffold adds entries INTO an existing index)`);
   }
   const topicRel = `${dirRel}/${name}.md`;
   const topicFile = join5(root, topicRel);

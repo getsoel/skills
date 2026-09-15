@@ -8,7 +8,7 @@
     {
       "name": "context-index",
       "description": "Keep a repo's lazy-loaded CLAUDE.md + context/index.md knowledge anchored and honest: capture session learnings, refactor CLAUDE.md, audit documented footguns, with a bundled validator.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "author": { "name": "getsoel" },
       "license": "MIT",
       "repository": "https://github.com/getsoel/skills",
