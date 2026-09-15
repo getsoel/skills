@@ -1,0 +1,33 @@
+{
+  "name": "getsoel",
+  "owner": { "name": "getsoel" },
+  "metadata": {
+    "description": "Agent skills from getsoel. Each skill follows the Agent Skills spec and also installs with `npx skills add getsoel/skills`."
+  },
+  "plugins": [
+    {
+      "name": "context-index",
+      "description": "Keep a repo's lazy-loaded CLAUDE.md + context/index.md knowledge anchored and honest: capture session learnings, refactor CLAUDE.md, audit documented footguns, with a bundled validator.",
+      "version": "0.1.0",
+      "author": { "name": "getsoel" },
+      "license": "MIT",
+      "repository": "https://github.com/getsoel/skills",
+      "source": "./",
+      "strict": false,
+      "skills": ["./skills/context-index"],
+      "hooks": {
+        "PreToolUse": [
+          {
+            "matcher": "Edit|Write",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "node \"${CLAUDE_PLUGIN_ROOT}/skills/context-index/hooks/inject-context.mjs\""
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
