@@ -1018,6 +1018,7 @@ Commands:
   check                  Validate the CLAUDE.md + context/index.md corpus (exit 1 on error)
                            [--fix] relocate a misplaced @context/index.md import
                            [--ignore <a,b>] skip foreign paths (also reads .contextignore)
+                           [--quiet] print errors only (for commit hooks and CI)
   scaffold <name> "<Use when trigger>"
                          New topic doc + wired index entry [--in <area>] [--no-check]
   footguns               Documented footguns to triage into fixes/checks [--limit N]
@@ -1096,7 +1097,8 @@ function runCheck(root, args, json) {
     if (result.ignored.files + result.ignored.dirs > 0) {
       console.log(`Ignored ${result.ignored.files} file(s) and ${result.ignored.dirs} path(s) via .contextignore / --ignore.`);
     }
-    const sorted = [...result.findings].sort((a, b) => a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1);
+    const shown = has(args, "--quiet") ? result.findings.filter((f) => f.sev === "error") : result.findings;
+    const sorted = [...shown].sort((a, b) => a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1);
     for (const f of sorted) {
       console.log(`  ${f.sev === "error" ? "ERROR" : "warn "} ${f.file}${f.line ? `:${f.line}` : ""}  ${f.msg}`);
     }
