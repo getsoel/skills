@@ -91,6 +91,20 @@ test("bundle: an orphan fails check, and scaffold wires a new doc", () => {
   );
 });
 
+test("bundle: --quiet prints errors but not warnings", () => {
+  writeFileSync(join(root, "CLAUDE.md"), "# repo\n\n@context/index.md\n");
+  writeFileSync(join(root, "context", "index.md"), "# Index\n\n- `context/auth.md` - Use when: touching auth\n");
+  writeFileSync(join(root, "context", "auth.md"), "# Auth\n\nUse when: touching auth\n\nDone ✓\n");
+  writeFileSync(join(root, "context", "orphan.md"), "# Orphan\n");
+  const loud = runBundle("check");
+  expect(loud.stdout).toContain("decorative check/cross glyph");
+  const quiet = runBundle("check", "--quiet");
+  expect(quiet.status).toBe(1);
+  expect(quiet.stdout).toContain("ERROR context/orphan.md");
+  expect(quiet.stdout).not.toContain("decorative check/cross glyph");
+  expect(quiet.stdout).toContain("1 error(s), 1 warning(s)");
+});
+
 test("bundle: an unknown command exits 2 with usage", () => {
   const r = runBundle("bogus");
   expect(r.status).toBe(2);

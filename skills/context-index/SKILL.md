@@ -147,6 +147,7 @@ A deterministic gate - the prose rules above are not self-enforcing, so every su
 - Run: `context-index check` (scans the current repo; `--target <path>` for another).
 - Autofix the one mechanical violation with `--fix` (relocates a misplaced `@context/index.md` import to the last line). Em dashes and smart typography are house style, so punctuation is never rewritten.
 - Exit 0 = clean (warnings allowed); exit 1 = errors remain - keep fixing.
+- `--quiet` prints only errors (warnings are still counted) - use it when wiring the check into a commit hook or CI.
 - Exclude foreign instruction files (legacy/demo/vendored `CLAUDE.md` the repo doesn't own): add literal paths (no globs) to a `.contextignore` at the repo root, one per line - e.g. `_legacy`, `expo/sports`. A bare name matches that dir/file at any depth; a path with a `/` anchors to the root and skips it plus anything beneath. Use `--ignore <a,b>` for one-offs. Ignore only files you don't author - never to silence real violations in your own corpus.
 
 Scope: root `CLAUDE.md`, the index tree (`context/index.md` plus every `context/<area>/index.md` it lists), every `context/**/*.md`, and colocated `**/CLAUDE.md`.

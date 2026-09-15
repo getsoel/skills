@@ -47,7 +47,7 @@ Three subcommands:
 Every deterministic step runs through `skills/context-index/scripts/context-index.mjs`, a dependency-free Node script (Node 18+). You can run it yourself, for example in CI or a pre-commit hook:
 
 ```bash
-node .claude/skills/context-index/scripts/context-index.mjs check
+node .claude/skills/context-index/scripts/context-index.mjs check --quiet
 ```
 
 | Command | Does |
