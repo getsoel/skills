@@ -15,7 +15,8 @@
  * else dropped — which measured ~124x smaller on that same transcript.
  *
  * The digest is STREAMED TO THE CALLER AND NEVER PERSISTED: nothing here writes
- * anywhere.
+ * anywhere. (The CLI separately records failure SIGNATURES - not the digest - in
+ * the friction ledger; see ledger.ts.)
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -194,12 +195,10 @@ export function digestLine(raw: string): DigestRow | null {
       : null;
   }
 
-  // A failed TOOL CALL and what it said. Narrower than "the session's failures":
-  // a command that exits non-zero inside Bash (a failing test, a `fatal:` from
-  // git) returns a SUCCESSFUL tool_result and is dropped as bulk below. Observed
-  // on a real session — several failed commands, exactly one is_error row, and it
-  // was a tool rejection. Widening this means keeping successful tool output,
-  // which is the bulk this digest exists to drop.
+  // A failed TOOL CALL and what it said: a rejection, a hook block, an MCP
+  // error, and - in current Claude Code - a Bash command that exited non-zero
+  // ("Exit code 1 …"; measured: 1,149 of 1,546 is_error rows across 681 real
+  // sessions). Successful tool output stays dropped as bulk.
   if (line.type === "user") {
     const err = errorOf(message?.content);
     return err ? { kind: "error", text: clip(err, MAX_ERROR_CHARS), ts } : null;
@@ -380,11 +379,17 @@ const LABEL: Record<DigestKind, string> = {
   error: "ERR ",
 };
 
-/** Render a digest for a reader — the form reflect actually reasons over. */
-export function formatDigest(result: GatherResult): string {
+/**
+ * Render a digest for a reader — the form reflect actually reasons over. When
+ * the friction ledger annotated an error row, the row says how many earlier
+ * sessions hit the same failure: that count is what reflect's repetition gate reads.
+ */
+export function formatDigest(result: GatherResult, seen?: Map<number, { seenBefore: number }>): string {
   const out: string[] = [];
-  for (const row of result.rows) {
-    out.push(`${LABEL[row.kind]}  ${row.text}`);
+  for (const [i, row] of result.rows.entries()) {
+    const s = seen?.get(i);
+    const tag = s && s.seenBefore > 0 ? `[seen in ${s.seenBefore} earlier session${s.seenBefore === 1 ? "" : "s"}] ` : "";
+    out.push(`${LABEL[row.kind]}  ${tag}${row.text}`);
     out.push("");
   }
   return out.join("\n");

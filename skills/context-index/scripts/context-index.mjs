@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { execFileSync } from "node:child_process";
-import { existsSync as existsSync6, realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { execFileSync as execFileSync2 } from "node:child_process";
+import { existsSync as existsSync7, realpathSync } from "node:fs";
+import { resolve as resolve2 } from "node:path";
 
 // src/check.ts
 import { existsSync as existsSync2, readFileSync as readFileSync2, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -1160,19 +1160,123 @@ var LABEL = {
   assistant: "ASST",
   error: "ERR "
 };
-function formatDigest(result) {
+function formatDigest(result, seen) {
   const out = [];
-  for (const row of result.rows) {
-    out.push(`${LABEL[row.kind]}  ${row.text}`);
+  for (const [i, row] of result.rows.entries()) {
+    const s = seen?.get(i);
+    const tag = s && s.seenBefore > 0 ? `[seen in ${s.seenBefore} earlier session${s.seenBefore === 1 ? "" : "s"}] ` : "";
+    out.push(`${LABEL[row.kind]}  ${tag}${row.text}`);
     out.push("");
   }
   return out.join(`
 `);
 }
 
+// src/ledger.ts
+import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync as existsSync5, mkdirSync, readFileSync as readFileSync5, readdirSync as readdirSync4 } from "node:fs";
+import { dirname as dirname2, isAbsolute, join as join5, resolve } from "node:path";
+var ERROR_LINE = /\b(error|fatal|not found|no such|denied|blocked|timed out|cannot|can't|failed|traceback|refused|unauthori[sz]ed|forbidden|no matches|not allowed|invalid)\b/i;
+var FRAME_LINE = /^(#+ |traceback \(most recent call last\)|at |node:internal|file "|\^|throw )/i;
+var MAX_SIGNATURE_CHARS = 120;
+function signatureOf(error) {
+  const lines = error.split(`
+`).map((l) => l.trim()).filter((l) => l && !/^exit code \d+$/i.test(l) && !FRAME_LINE.test(l));
+  if (!lines.length)
+    return null;
+  const pick = lines.find((l) => ERROR_LINE.test(l)) ?? lines[0];
+  const sig = pick.replace(/\u001b\[[0-9;]*m/g, "").replace(/https?:\/\/\S+/g, "<url>").replace(/(?:~|\.{1,2})?\/[\w.@~+-]+(?:\/[\w.@~+-]*)+/g, "<path>").replace(/\b[\w.@~+-]+(?:\/[\w.@~+-]+)+\/?/g, "<path>").replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "<id>").replace(/\b[A-Za-z0-9+/_-]{24,}={0,2}/g, "<id>").replace(/(["`]).*?\1/g, "<q>").replace(/(^|[\s(=:])'[^']*'/g, "$1<q>").replace(/\d+/g, "N").replace(/\s+/g, " ").toLowerCase().trim();
+  return sig ? sig.slice(0, MAX_SIGNATURE_CHARS) : null;
+}
+function ledgerPath(cwd = process.cwd()) {
+  let common;
+  try {
+    common = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+  } catch {
+    return null;
+  }
+  const dir = isAbsolute(common) ? common : resolve(cwd, common);
+  return join5(dir, "context-index", "friction.jsonl");
+}
+function readLedger(path) {
+  if (!existsSync5(path))
+    return [];
+  const out = [];
+  for (const raw of readFileSync5(path, "utf8").split(`
+`)) {
+    if (!raw.trim())
+      continue;
+    try {
+      const e = JSON.parse(raw);
+      if (typeof e.sig === "string" && typeof e.session === "string")
+        out.push(e);
+    } catch {}
+  }
+  return out;
+}
+function recordFriction(result, path) {
+  const sightings = new Map;
+  const session = result.sessionId;
+  if (!session)
+    return sightings;
+  const prior = new Map;
+  for (const e of readLedger(path)) {
+    if (!prior.has(e.sig))
+      prior.set(e.sig, new Set);
+    prior.get(e.sig).add(e.session);
+  }
+  const fresh = [];
+  result.rows.forEach((row, i) => {
+    if (row.kind !== "error")
+      return;
+    const sig = signatureOf(row.text);
+    if (!sig)
+      return;
+    const sessions = prior.get(sig) ?? new Set;
+    sightings.set(i, { signature: sig, seenBefore: [...sessions].filter((s) => s !== session).length });
+    if (!sessions.has(session)) {
+      sessions.add(session);
+      prior.set(sig, sessions);
+      fresh.push({ sig, session, ts: row.ts });
+    }
+  });
+  if (fresh.length) {
+    try {
+      mkdirSync(dirname2(path), { recursive: true });
+      appendFileSync(path, fresh.map((e) => JSON.stringify(e)).join(`
+`) + `
+`);
+    } catch {}
+  }
+  return sightings;
+}
+function backfillLedger(path, cwd = process.cwd()) {
+  let entries;
+  try {
+    entries = readdirSync4(claudeProjectDir(cwd));
+  } catch {
+    return 0;
+  }
+  let n = 0;
+  for (const entry of entries.sort()) {
+    if (!entry.endsWith(".jsonl"))
+      continue;
+    const result = gatherDigest({ sessionId: entry.slice(0, -".jsonl".length), cwd });
+    if (!result.transcript)
+      continue;
+    recordFriction(result, path);
+    n++;
+  }
+  return n;
+}
+
 // src/scaffold.ts
-import { existsSync as existsSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join5 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join6 } from "node:path";
 function normalizeTopicName(raw) {
   return raw.replace(/\.md$/i, "").replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[_\s]+/g, "-").toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
@@ -1190,16 +1294,16 @@ function scaffoldTopic(root, rawName, rawTrigger, opts = {}) {
   const area = (opts.area ?? "").replace(/^context\//, "").split("/").map(normalizeTopicName).filter(Boolean).join("/");
   const dirRel = area ? `context/${area}` : "context";
   const indexRel = `${dirRel}/index.md`;
-  const indexFile = join5(root, indexRel);
-  if (!existsSync5(indexFile)) {
+  const indexFile = join6(root, indexRel);
+  if (!existsSync6(indexFile)) {
     throw new Error(area ? `no ${indexRel} under ${root} - create the area index and list it from a parent index first (scaffold adds INTO an existing index)` : `no context/index.md under ${root} - create it first with a "# Context index" title and an IMPORTANT directive line - e.g. "IMPORTANT: Read an entry only when your task matches its Use when. Don't read ahead." (scaffold adds entries INTO an existing index)`);
   }
   const topicRel = `${dirRel}/${name}.md`;
-  const topicFile = join5(root, topicRel);
-  if (existsSync5(topicFile)) {
+  const topicFile = join6(root, topicRel);
+  if (existsSync6(topicFile)) {
     throw new Error(`${topicRel} already exists - edit it directly or pick another name`);
   }
-  const indexLines = readFileSync5(indexFile, "utf8").split(`
+  const indexLines = readFileSync6(indexFile, "utf8").split(`
 `);
   for (let i = 0;i < indexLines.length; i++) {
     if (entryPath(indexLines[i]) === topicRel) {
@@ -1254,6 +1358,7 @@ Commands:
                          New topic doc + wired index entry [--in <area>] [--no-check]
   footguns               Documented footguns to triage into fixes/checks [--limit N]
   gather                 Digest a Claude Code session transcript [--session <id>] [--limit N]
+                         Records failure signatures in the repo's friction ledger [--no-ledger]; --backfill seeds it from past sessions
 
 Options:
   --target <path>        Repo to operate on (default: the git toplevel of the cwd)
@@ -1286,16 +1391,16 @@ var flag = (args, name) => args.flags.get(name)?.at(-1);
 var has = (args, name) => args.flags.has(name);
 var list = (args, name) => (args.flags.get(name) ?? []).flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean);
 function resolveRoot(target) {
-  const start = resolve(target ?? process.cwd());
+  const start = resolve2(target ?? process.cwd());
   let root = start;
   try {
-    root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    root = execFileSync2("git", ["rev-parse", "--show-toplevel"], {
       cwd: start,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim() || start;
   } catch {}
-  return existsSync6(root) ? realpathSync(root) : root;
+  return existsSync7(root) ? realpathSync(root) : root;
 }
 var plural2 = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 function runLs(root, json) {
@@ -1404,9 +1509,17 @@ Top files:`);
   }
 }
 function runGather(args, json) {
+  const ledger = has(args, "--no-ledger") ? null : ledgerPath();
+  if (has(args, "--backfill")) {
+    if (!ledger)
+      throw new Error("--backfill needs a git repo (the ledger lives in its git dir)");
+    console.log(`Backfilled the friction ledger from ${backfillLedger(ledger)} session(s): ${ledger}`);
+    return;
+  }
   const result = gatherDigest({ sessionId: flag(args, "--session"), limit: parseLimit(args, 0) });
+  const seen = ledger && result.transcript ? recordFriction(result, ledger) : new Map;
   if (json) {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify({ ...result, friction: [...seen].map(([row, s]) => ({ row, ...s })) }, null, 2));
     return;
   }
   if (!result.transcript) {
@@ -1421,7 +1534,7 @@ function runGather(args, json) {
   console.log(`# ${result.transcript}`);
   console.log(`# ${s.lines} line(s) -> ${result.rows.length} row(s); ${s.deduped} duplicate(s) collapsed; ${ratio}x smaller than raw
 `);
-  console.log(formatDigest(result));
+  console.log(formatDigest(result, seen));
 }
 function main(argv) {
   const args = parseArgs(argv);

@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import { checkContext, loadIndexTree } from "./check";
 import { findFootguns } from "./footguns";
 import { formatDigest, gatherDigest } from "./gather";
+import { backfillLedger, ledgerPath, recordFriction } from "./ledger";
 import { scaffoldTopic } from "./scaffold";
 
 const USAGE = `usage: context-index <command> [options]
@@ -22,6 +23,7 @@ Commands:
                          New topic doc + wired index entry [--in <area>] [--no-check]
   footguns               Documented footguns to triage into fixes/checks [--limit N]
   gather                 Digest a Claude Code session transcript [--session <id>] [--limit N]
+                         Records failure signatures in the repo's friction ledger [--no-ledger]; --backfill seeds it from past sessions
 
 Options:
   --target <path>        Repo to operate on (default: the git toplevel of the cwd)
@@ -188,9 +190,16 @@ function runGather(args: Args, json: boolean): void {
   // cwd is deliberately NOT the repo root: Claude Code files a transcript under the directory
   // it is running in, which for a session driving worktrees is not the root. Resolution falls
   // back to a session-id scan anyway, so this only picks the fast path.
+  const ledger = has(args, "--no-ledger") ? null : ledgerPath();
+  if (has(args, "--backfill")) {
+    if (!ledger) throw new Error("--backfill needs a git repo (the ledger lives in its git dir)");
+    console.log(`Backfilled the friction ledger from ${backfillLedger(ledger)} session(s): ${ledger}`);
+    return;
+  }
   const result = gatherDigest({ sessionId: flag(args, "--session"), limit: parseLimit(args, 0) });
+  const seen = ledger && result.transcript ? recordFriction(result, ledger) : new Map();
   if (json) {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify({ ...result, friction: [...seen].map(([row, s]) => ({ row, ...s })) }, null, 2));
     return;
   }
   if (!result.transcript) {
@@ -206,7 +215,7 @@ function runGather(args: Args, json: boolean): void {
   const ratio = s.digestBytes > 0 ? Math.round(s.rawBytes / s.digestBytes) : 0;
   console.log(`# ${result.transcript}`);
   console.log(`# ${s.lines} line(s) -> ${result.rows.length} row(s); ${s.deduped} duplicate(s) collapsed; ${ratio}x smaller than raw\n`);
-  console.log(formatDigest(result));
+  console.log(formatDigest(result, seen));
 }
 
 export function main(argv: string[]): void {
