@@ -1,0 +1,52 @@
+# Validation
+
+`context-index check` is the deterministic gate. Run it from the target repo and resolve every error before declaring done.
+
+- Run: `context-index check` (scans the current repo; `--target <path>` for another).
+- Autofix the one mechanical violation with `--fix` (relocates a misplaced `@context/index.md` import to the last line). Em dashes and smart typography are house style, so punctuation is never rewritten.
+- Exit 0 = clean (warnings allowed); exit 1 = errors remain - keep fixing.
+- `--quiet` prints only errors (warnings are still counted) - use it when wiring the check into a commit hook or CI.
+- Exclude foreign instruction files (legacy/demo/vendored `CLAUDE.md` the repo doesn't own): add literal paths (no globs) to a `.contextignore` at the repo root, one per line - e.g. `_legacy`, `expo/sports`. A bare name matches that dir/file at any depth; a path with a `/` anchors to the root and skips it plus anything beneath. Use `--ignore <a,b>` for one-offs. Ignore only files you don't author - never to silence real violations in your own corpus.
+
+Scope: root `CLAUDE.md`, the index tree (`context/index.md` plus every `context/<area>/index.md` it lists), every `context/**/*.md`, colocated `**/CLAUDE.md`, and project skills under `.claude/skills/*/SKILL.md` and `.agents/skills/*/SKILL.md`.
+
+## Errors
+
+- Orphaned topic docs and sub-indexes (anywhere under `context/`, listed by no index reachable from the root; matched by full path)
+- Dangling `context/` pointers
+- Identical-body duplicate docs
+- Index entries missing a "Use when:" trigger or using an eager `@`
+- Missing `@context/index.md` import
+- Length over budget: lines (root 150, colocated 200, topic 200) or tokens (colocated ~5k, topic ~10k)
+
+## Warnings (heuristic smells - review, don't blindly obey)
+
+Load cost - what a session pays without asking for it:
+
+- Always-loaded layer (root + index) over ~2.5k tokens
+- Colocated CLAUDE.md over ~2.5k tokens, topic doc over ~5k
+- A colocated CLAUDE.md whose ancestor stack (it plus every colocated CLAUDE.md above it) is over ~6k tokens - all of them load when a file in that directory is touched
+- Prose lines over 400 chars in an auto-loaded file - a paragraph packed onto one line, so the line budget understates the file
+- An index directive that reads ahead ("when in doubt", "always read") - every arguable trigger becomes eager
+- A broad trigger ("navigating", "overview", "any task", "locating which package owns code") on a doc over ~1.5k tokens - it fires on nearly every task
+- A skill description over 500 chars, a SKILL.md over ~5k tokens (it loads whole on invocation and only its first ~5k survive a compaction), or a project skill listing over ~3k tokens
+
+Hygiene:
+
+- Decorative status glyphs (✓✗); backslash-escaped markdown
+- Fenced code block in CLAUDE.md/index (inlined snippet - link to source)
+- External dangling pointers
+- Length over the ideal; an index over the ~20-entry soft cap; an index listed twice or in a cycle
+- Triggers sharing distinctive keywords (ambiguous routing); trigger keywords largely absent from their doc (stale/drift)
+- Stale path-scoped glob (an entry's optional `; paths:` directory no longer exists)
+- Dated state claim with no nearby anchor
+- `## Commands` after `## Architecture`
+
+Tokens are estimated at 3 chars/token. Dense instruction markdown runs nearer 2.5, so real cost is usually a little higher than reported. For an exact figure, Claude Code's `/context` lists each loaded memory file.
+
+## Does NOT catch - still your judgment
+
+- Whether a flagged overlap/drift is real
+- Classification (universal vs colocated vs cross-cutting)
+- Whether a skill is started by hand (hide it from the model) or by the model (keep its description)
+- Subtle trigger staleness; prose-vs-bullets quality

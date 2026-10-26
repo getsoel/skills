@@ -1,0 +1,7 @@
+schema_version: "1.1"
+name: save-runbook-near-budget
+description: A long runbook learned in a session, saved where a nested CLAUDE.md stack is already near its budget.
+tags: [load-cost, reflect]
+expected_outcome: The runbook lands in a context/ topic doc behind a specific trigger; the nested CLAUDE.md gains at most a one-line pointer, and no deeper nested CLAUDE.md is created.
+context:
+  scaffold_script: scaffold.sh

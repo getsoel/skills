@@ -236,3 +236,115 @@ test("loadIndexTree flattens nested entries and names the index each came from",
     ["context/payments/index.md", "context/payments/stripe.md", 1],
   ]);
 });
+
+// Load budgets: what a file costs in tokens, not lines.
+const warns = (r: { findings: { file: string; line: number; sev: string; msg: string }[] }) => r.findings.filter((f) => f.sev === "warn");
+const prose = (chars: number) => `${"word ".repeat(Math.ceil(chars / 5)).trim()}\n`;
+const indexed = () => {
+  writeFileSync(join(root, "CLAUDE.md"), "# repo\n\n@context/index.md\n");
+  writeFileSync(join(root, "context", "index.md"), "# Index\n");
+};
+
+test("a colocated CLAUDE.md under the line budget but over the token budget is an error", () => {
+  indexed();
+  mkdirSync(join(root, "pkg"));
+  // 150 lines of 120 chars: inside the 200-line budget, ~6k tokens.
+  writeFileSync(join(root, "pkg", "CLAUDE.md"), prose(120).repeat(150));
+  const e = errs(checkContext(root));
+  expect(e.some((f) => f.file === "pkg/CLAUDE.md" && f.msg.includes("tokens > 5000"))).toBe(true);
+  expect(e.some((f) => f.msg.includes("lines >"))).toBe(false);
+});
+
+test("paragraphs packed onto long lines warn in CLAUDE.md, not in a topic doc", () => {
+  indexed();
+  mkdirSync(join(root, "pkg"));
+  writeFileSync(join(root, "pkg", "CLAUDE.md"), `# pkg\n\n${prose(900)}| ${"x".repeat(500)} |\n`);
+  writeFileSync(join(root, "context", "index.md"), "# Index\n\n- `context/long.md` - Use when: tuning the cache\n");
+  writeFileSync(join(root, "context", "long.md"), `# Long\n\ncache ${prose(900)}`);
+  const w = warns(checkContext(root));
+  const long = w.filter((f) => f.msg.includes("over 400 chars"));
+  expect(long).toHaveLength(1);
+  expect(long[0]!.file).toBe("pkg/CLAUDE.md");
+  expect(long[0]!.msg).toContain("1 line(s)");
+});
+
+test("a stack of nested CLAUDE.md files over budget warns at the deepest file", () => {
+  indexed();
+  mkdirSync(join(root, "svc", "payments"), { recursive: true });
+  writeFileSync(join(root, "svc", "CLAUDE.md"), prose(9000));
+  writeFileSync(join(root, "svc", "payments", "CLAUDE.md"), prose(10500));
+  const stack = warns(checkContext(root)).filter((f) => f.msg.includes("ancestor CLAUDE.md"));
+  expect(stack).toHaveLength(1);
+  expect(stack[0]!.file).toBe("svc/payments/CLAUDE.md");
+  expect(stack[0]!.msg).toContain("(svc)");
+});
+
+test("small nested CLAUDE.md files do not warn as a stack", () => {
+  indexed();
+  mkdirSync(join(root, "svc", "payments"), { recursive: true });
+  writeFileSync(join(root, "svc", "CLAUDE.md"), prose(3000));
+  writeFileSync(join(root, "svc", "payments", "CLAUDE.md"), prose(3000));
+  expect(warns(checkContext(root)).some((f) => f.msg.includes("ancestor CLAUDE.md"))).toBe(false);
+});
+
+test("an index directive to read ahead warns; matching-only routing does not", () => {
+  writeFileSync(join(root, "CLAUDE.md"), "# repo\n\n@context/index.md\n");
+  writeFileSync(join(root, "context", "index.md"), "# Index\n\nIMPORTANT: if a Use when matches, read that file first. When in doubt, read it.\n");
+  expect(warns(checkContext(root)).some((f) => f.msg.includes('read ahead ("When in doubt")'))).toBe(true);
+
+  writeFileSync(join(root, "context", "index.md"), "# Index\n\nIMPORTANT: read an entry only when your task matches its Use when.\n");
+  expect(warns(checkContext(root)).some((f) => f.msg.includes("read ahead"))).toBe(false);
+});
+
+test("a broad trigger warns on a long doc, not a short one", () => {
+  writeFileSync(join(root, "CLAUDE.md"), "# repo\n\n@context/index.md\n");
+  writeFileSync(join(root, "context", "index.md"),
+    "# Index\n\n- `context/architecture.md` - Use when: navigating the monorepo\n- `context/layout.md` - Use when: navigating the monorepo layout\n");
+  writeFileSync(join(root, "context", "architecture.md"), `# Architecture\n\nnavigating monorepo ${prose(6000)}`);
+  writeFileSync(join(root, "context", "layout.md"), "# Layout\n\nnavigating the monorepo layout.\n");
+  const broad = warns(checkContext(root)).filter((f) => f.msg.includes("broad trigger"));
+  expect(broad).toHaveLength(1);
+  expect(broad[0]!.line).toBe(3);
+});
+
+test("a 'locating which package owns code' trigger is broad; a specific locating trigger is not", () => {
+  writeFileSync(join(root, "CLAUDE.md"), "# repo\n\n@context/index.md\n");
+  writeFileSync(join(root, "context", "index.md"),
+    "# Index\n\n- `context/architecture.md` - Use when: locating which app, service, or package owns code\n- `context/vod.md` - Use when: locating a VOD segment in B2 storage\n");
+  writeFileSync(join(root, "context", "architecture.md"), `# Architecture\n\nlocating app service package owns code ${prose(6000)}`);
+  writeFileSync(join(root, "context", "vod.md"), `# VOD\n\nlocating segment storage ${prose(6000)}`);
+  const broad = warns(checkContext(root)).filter((f) => f.msg.includes("broad trigger"));
+  expect(broad).toHaveLength(1);
+  expect(broad[0]!.msg).toContain("locating which app");
+});
+
+const skill = (name: string, description: string, body = "# Skill\n") => {
+  mkdirSync(join(root, ".claude", "skills", name), { recursive: true });
+  writeFileSync(join(root, ".claude", "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n\n${body}`);
+};
+
+test("a long skill description and a long SKILL.md warn", () => {
+  indexed();
+  skill("terse", "Look up the API.");
+  skill("chatty", `Use when ${"any of these happen, ".repeat(40)}`, prose(18000));
+  const w = warns(checkContext(root)).filter((f) => f.file.startsWith(".claude/skills/"));
+  expect(w.every((f) => f.file === ".claude/skills/chatty/SKILL.md")).toBe(true);
+  expect(w.some((f) => f.msg.includes("skill description is"))).toBe(true);
+  expect(w.some((f) => f.msg.includes("SKILL.md ~"))).toBe(true);
+});
+
+test("a block-scalar skill description is measured too", () => {
+  indexed();
+  mkdirSync(join(root, ".claude", "skills", "folded"), { recursive: true });
+  writeFileSync(join(root, ".claude", "skills", "folded", "SKILL.md"),
+    `---\nname: folded\ndescription: >\n  ${"a long folded line. ".repeat(20)}\n  ${"and another one. ".repeat(20)}\nlicense: MIT\n---\n\n# Folded\n`);
+  expect(warns(checkContext(root)).some((f) => f.msg.includes("skill description is"))).toBe(true);
+});
+
+test("many skills warn about the total listing", () => {
+  indexed();
+  for (let i = 0; i < 25; i++) skill(`skill-${i}`, `Use when ${"something specific happens here. ".repeat(13)}`);
+  const listing = warns(checkContext(root)).filter((f) => f.msg.includes("project skill listing"));
+  expect(listing).toHaveLength(1);
+  expect(listing[0]!.msg).toContain("across 25 skills");
+});

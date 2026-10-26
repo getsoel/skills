@@ -4,7 +4,7 @@ Priority-ordered - first lines get highest attention. Keep CLAUDE.md lean; refer
 
 1. **Project identity** - one-sentence description + tech stack
 2. **Commands** - exact build/test/lint/run CLIs including single-test variant
-3. **Architecture** - 2-5 line directory sketch (full layout goes in `context/architecture.md`)
+3. **Architecture** - 2-5 line directory sketch. Deeper layout detail goes into topic docs with specific triggers ("adding a package", "editing CI workflows"), never one `context/architecture.md` behind a catch-all trigger like "navigating the repo"
 4. **Workflow conventions** - processes that span tasks ("run lint before commit, not after"; "feature branches, squash on merge"; "run single failing tests in isolation")
 5. **Constraints** - hard prohibitions with alternatives ("Never X, use Y instead")
 6. `@context/index.md`
@@ -25,7 +25,7 @@ Specifically:
 
 <100 lines ideal. 100-150 acceptable. >150 means something that looks universal is actually domain-scoped - extract it.
 
-Colocated `<dir>/CLAUDE.md` files follow the instruction-file budget: <200 lines (ideal <150). Over that, push deep detail (long code samples, a second concern) into a nested `<subdir>/CLAUDE.md` or a `context/<topic>.md`.
+Colocated `<dir>/CLAUDE.md` files: <200 lines AND ~2.5k tokens (error at ~5k). A file loads with every colocated CLAUDE.md above it, so keep each stack under ~6k tokens. Over budget, move long-form detail (runbooks, design rationale, reference tables) into a `context/<topic>.md` behind a specific trigger - not into a deeper nested CLAUDE.md, which lengthens the stack.
 
 The always-loaded layer is root CLAUDE.md PLUS the eager `context/index.md` - they load together every session, so budget them jointly and keep the combined size small. Adherence drops as instruction count grows, and accuracy drops with raw context length even when the relevant text is present - so treat every index entry as spending the same budget as a root line. The validator warns when the combined layer exceeds ~2500 tokens.
 
