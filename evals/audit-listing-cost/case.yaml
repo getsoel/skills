@@ -1,0 +1,7 @@
+schema_version: "1.1"
+name: audit-listing-cost
+description: A lean doc corpus whose startup cost is eight workflows with long descriptions; two skills are already hidden from the model.
+tags: [load-cost, audit]
+expected_outcome: The audit names the workflow listing as the main startup cost and proposes shortening the workflow descriptions; it does not blame the hidden skills.
+context:
+  scaffold_script: scaffold.sh

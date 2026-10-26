@@ -344,7 +344,60 @@ test("a block-scalar skill description is measured too", () => {
 test("many skills warn about the total listing", () => {
   indexed();
   for (let i = 0; i < 25; i++) skill(`skill-${i}`, `Use when ${"something specific happens here. ".repeat(13)}`);
-  const listing = warns(checkContext(root)).filter((f) => f.msg.includes("project skill listing"));
+  const listing = warns(checkContext(root)).filter((f) => f.msg.includes("project skill/workflow listing"));
   expect(listing).toHaveLength(1);
   expect(listing[0]!.msg).toContain("across 25 skills");
+});
+
+const workflow = (name: string, description: string, whenToUse?: string) => {
+  mkdirSync(join(root, ".claude", "workflows"), { recursive: true });
+  writeFileSync(join(root, ".claude", "workflows", `${name}.js`),
+    `export const meta = {\n  name: "${name}",\n  description:\n    "${description}",\n${whenToUse ? `  whenToUse: '${whenToUse}',\n` : ""}  phases: [{ title: "Run" }],\n};\nconst whenToUse = "not part of the listing";\n`);
+};
+
+test("workflows count toward the listing, with per-entry overhead", () => {
+  indexed();
+  for (let i = 0; i < 12; i++) skill(`skill-${i}`, `Use when ${"something specific happens. ".repeat(4)}`);
+  // 12 skills alone: ~12 x (40 + 75) tokens - under budget.
+  expect(warns(checkContext(root)).some((f) => f.msg.includes("listing ~"))).toBe(false);
+  for (let i = 0; i < 12; i++) workflow(`flow-${i}`, `Drive a thing end to end ${"with care ".repeat(20)}`, "Invoke with args {ticket}.");
+  const listing = warns(checkContext(root)).filter((f) => f.msg.includes("listing ~"));
+  expect(listing).toHaveLength(1);
+  expect(listing[0]!.msg).toContain("across 12 skills + 12 workflows");
+});
+
+test("a long workflow description warns; whenToUse outside meta is ignored", () => {
+  indexed();
+  workflow("chatty", `Drive tickets ${"through every stage ".repeat(20)}`, `Invoke with args ${"{a, b} ".repeat(30)}`);
+  workflow("terse", "Review the screenshots.");
+  const w = warns(checkContext(root)).filter((f) => f.msg.includes("workflow listing text"));
+  expect(w).toHaveLength(1);
+  expect(w[0]!.file).toBe(".claude/workflows/chatty.js");
+});
+
+test("hidden skills leave the listing total and are named as not counted", () => {
+  indexed();
+  const body = `Use when ${"something specific happens here. ".repeat(13)}`;
+  for (let i = 0; i < 25; i++) skill(`skill-${i}`, body);
+  for (let i = 0; i < 25; i++) {
+    const f = join(root, ".claude", "skills", `skill-${i}`, "SKILL.md");
+    if (i < 20) writeFileSync(f, readFileSync(f, "utf8").replace("---\n\n", "disable-model-invocation: true\n---\n\n"));
+  }
+  // 5 visible skills: under budget even though 25 exist.
+  expect(warns(checkContext(root)).some((f) => f.msg.includes("listing ~"))).toBe(false);
+  for (let i = 0; i < 20; i++) skill(`more-${i}`, body);
+  const listing = warns(checkContext(root)).filter((f) => f.msg.includes("listing ~"));
+  expect(listing).toHaveLength(1);
+  expect(listing[0]!.msg).toContain("across 25 skills");
+  expect(listing[0]!.msg).toContain("20 hidden skills, which are not listed");
+});
+
+test("enabled project plugins are named as listed but not counted", () => {
+  indexed();
+  mkdirSync(join(root, ".claude"), { recursive: true });
+  writeFileSync(join(root, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { "jira-org@acme": true, "off@acme": false } }));
+  for (let i = 0; i < 25; i++) skill(`skill-${i}`, `Use when ${"something specific happens here. ".repeat(13)}`);
+  const listing = warns(checkContext(root)).filter((f) => f.msg.includes("listing ~"));
+  expect(listing[0]!.msg).toContain("skills of enabled plugin(s) jira-org@acme");
+  expect(listing[0]!.msg).not.toContain("off@acme");
 });

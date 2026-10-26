@@ -85,6 +85,15 @@ const SKILL_DESCRIPTION_MAX = 500;
 const SKILL_BODY_TOKEN_WARN = 5000;
 const SKILL_LISTING_TOKEN_WARN = 3000;
 
+// Claude Code workflows (`.claude/workflows/*.js`) are listed every session too: their
+// `meta.name`, `meta.description` and `meta.whenToUse`.
+const WORKFLOW_DIR = ".claude/workflows";
+
+// Each listed entry costs more than its text. Measured in Claude Code: hiding six skills
+// whose name + description came to 2,810 chars cut the first request by 1,387 tokens, where
+// chars/3 alone predicts ~940 - about 75 tokens per entry on top.
+const LISTING_ENTRY_TOKENS = 75;
+
 // Style hygiene is deliberately light: em dashes and smart typography are a repo's own
 // house-style choice, so only genuinely decorative status glyphs are flagged, and only as a
 // warning - never failing the gate.
@@ -306,8 +315,49 @@ function skillDescription(text: string): string {
   return block.join(" ");
 }
 
+// A skill hidden from the model (Claude Code's `disable-model-invocation: true`) is not in the
+// listing; a person still starts it with /<name>.
+const isHiddenSkill = (text: string): boolean =>
+  /^disable-model-invocation:\s*true\s*$/m.test(text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "");
+
+// The string literal starting at `i` (quote char at s[i]), unescaped; "" if there is none.
+function readStringLiteral(s: string, i: number): string {
+  const q = s[i];
+  if (q !== '"' && q !== "'" && q !== "`") return "";
+  let out = "";
+  for (let k = i + 1; k < s.length; k++) {
+    const c = s[k];
+    if (c === "\\") { out += s[++k] ?? ""; continue; }
+    if (c === q) return out;
+    out += c;
+  }
+  return "";
+}
+
+// `meta.<key>` from a workflow script's `export const meta = { ... }` literal.
+function workflowMetaField(src: string, key: string): string {
+  const start = src.indexOf("export const meta");
+  if (start === -1) return "";
+  // The literal ends at the first line that closes it at column 0.
+  const end = src.slice(start).search(/\n\}/);
+  const meta = end === -1 ? src.slice(start) : src.slice(start, start + end);
+  const hit = new RegExp(`\\b${key}\\s*:\\s*`).exec(meta);
+  return hit ? readStringLiteral(meta, hit.index + hit[0].length) : "";
+}
+
+// Project plugins switched on in `.claude/settings.json`: their skills are listed too, but
+// their files live outside the repo.
+function enabledPlugins(root: string): string[] {
+  try {
+    const s = JSON.parse(readFileSync(join(root, ".claude", "settings.json"), "utf8"));
+    return Object.entries(s.enabledPlugins ?? {}).filter(([, on]) => on === true).map(([name]) => name);
+  } catch {
+    return [];
+  }
+}
+
 function checkSkills(root: string, isIgnored: (rel: string) => boolean, add: AddFn): void {
-  let listing = 0, count = 0;
+  let listing = 0, count = 0, hidden = 0;
   let firstDir = "";
   for (const base of SKILL_DIRS) {
     let dirs;
@@ -323,9 +373,13 @@ function checkSkills(root: string, isIgnored: (rel: string) => boolean, add: Add
       if (!existsSync(file)) continue;
       const text = readFileSync(file, "utf8");
       const desc = skillDescription(text);
-      count++;
-      listing += tokensOf(d.name + desc);
       if (!firstDir) firstDir = file;
+      if (isHiddenSkill(text)) {
+        hidden++;
+      } else {
+        count++;
+        listing += tokensOf(d.name + desc) + LISTING_ENTRY_TOKENS;
+      }
       if (desc.length > SKILL_DESCRIPTION_MAX) {
         add(file, 0, "warn", `skill description is ${desc.length} chars > ${SKILL_DESCRIPTION_MAX} -> it is listed in every session; say what the skill does and when in a sentence or two, and move trigger catalogues into the body`);
       }
@@ -335,8 +389,36 @@ function checkSkills(root: string, isIgnored: (rel: string) => boolean, add: Add
       }
     }
   }
+  let workflows = 0;
+  let files: string[] = [];
+  try {
+    files = readdirSync(join(root, WORKFLOW_DIR)).filter((f) => /\.m?js$/.test(f)).sort();
+  } catch {
+    // no workflows
+  }
+  for (const f of files) {
+    const rel = join(WORKFLOW_DIR, f);
+    if (isIgnored(rel)) continue;
+    const file = join(root, rel);
+    const src = readFileSync(file, "utf8");
+    const desc = workflowMetaField(src, "description");
+    if (!desc) continue;
+    const when = workflowMetaField(src, "whenToUse");
+    workflows++;
+    listing += tokensOf(workflowMetaField(src, "name") + desc + when) + LISTING_ENTRY_TOKENS;
+    if (!firstDir) firstDir = file;
+    if (desc.length + when.length > SKILL_DESCRIPTION_MAX) {
+      add(file, 0, "warn", `workflow listing text (meta.description + meta.whenToUse) is ${desc.length + when.length} chars > ${SKILL_DESCRIPTION_MAX} -> it is listed in every session; say what it does and when in a sentence or two, and move argument detail into a comment or doc the workflow points at`);
+    }
+  }
   if (listing > SKILL_LISTING_TOKEN_WARN) {
-    add(firstDir, 0, "warn", `project skill listing ~${listing} tokens across ${count} skills > ${SKILL_LISTING_TOKEN_WARN} -> it loads every session; trim descriptions, merge overlapping skills, and hide skills people start by hand from the model where the agent supports it (e.g. Claude Code's disable-model-invocation)`);
+    const plugins = enabledPlugins(root);
+    const what = [plural(count, "skill", "skills"), ...(workflows ? [plural(workflows, "workflow", "workflows")] : [])].join(" + ");
+    const notCounted = [
+      ...(hidden ? [`${plural(hidden, "hidden skill", "hidden skills")}, which are not listed`] : []),
+      ...(plugins.length ? [`skills of enabled plugin(s) ${plugins.join(", ")}`] : []),
+    ];
+    add(firstDir, 0, "warn", `project skill/workflow listing ~${listing} tokens across ${what} > ${SKILL_LISTING_TOKEN_WARN}${notCounted.length ? ` (not counted: ${notCounted.join("; ")})` : ""} -> it loads every session; trim descriptions, merge overlapping skills, and hide skills people start by hand from the model where the agent supports it (e.g. Claude Code's disable-model-invocation)`);
   }
 }
 

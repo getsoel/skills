@@ -148,6 +148,8 @@ var SKILL_DIRS = [".claude/skills", ".agents/skills"];
 var SKILL_DESCRIPTION_MAX = 500;
 var SKILL_BODY_TOKEN_WARN = 5000;
 var SKILL_LISTING_TOKEN_WARN = 3000;
+var WORKFLOW_DIR = ".claude/workflows";
+var LISTING_ENTRY_TOKENS = 75;
 var DECORATIVE = [
   { re: /[✓✗✅❌]/g, name: "decorative check/cross glyph" }
 ];
@@ -421,8 +423,43 @@ function skillDescription(text) {
   }
   return block.join(" ");
 }
+var isHiddenSkill = (text) => /^disable-model-invocation:\s*true\s*$/m.test(text.match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "");
+function readStringLiteral(s, i) {
+  const q = s[i];
+  if (q !== '"' && q !== "'" && q !== "`")
+    return "";
+  let out = "";
+  for (let k = i + 1;k < s.length; k++) {
+    const c = s[k];
+    if (c === "\\") {
+      out += s[++k] ?? "";
+      continue;
+    }
+    if (c === q)
+      return out;
+    out += c;
+  }
+  return "";
+}
+function workflowMetaField(src, key) {
+  const start = src.indexOf("export const meta");
+  if (start === -1)
+    return "";
+  const end = src.slice(start).search(/\n\}/);
+  const meta = end === -1 ? src.slice(start) : src.slice(start, start + end);
+  const hit = new RegExp(`\\b${key}\\s*:\\s*`).exec(meta);
+  return hit ? readStringLiteral(meta, hit.index + hit[0].length) : "";
+}
+function enabledPlugins(root) {
+  try {
+    const s = JSON.parse(readFileSync2(join2(root, ".claude", "settings.json"), "utf8"));
+    return Object.entries(s.enabledPlugins ?? {}).filter(([, on]) => on === true).map(([name]) => name);
+  } catch {
+    return [];
+  }
+}
 function checkSkills(root, isIgnored, add) {
-  let listing = 0, count = 0;
+  let listing = 0, count = 0, hidden = 0;
   let firstDir = "";
   for (const base of SKILL_DIRS) {
     let dirs;
@@ -440,10 +477,14 @@ function checkSkills(root, isIgnored, add) {
         continue;
       const text = readFileSync2(file, "utf8");
       const desc = skillDescription(text);
-      count++;
-      listing += tokensOf(d.name + desc);
       if (!firstDir)
         firstDir = file;
+      if (isHiddenSkill(text)) {
+        hidden++;
+      } else {
+        count++;
+        listing += tokensOf(d.name + desc) + LISTING_ENTRY_TOKENS;
+      }
       if (desc.length > SKILL_DESCRIPTION_MAX) {
         add(file, 0, "warn", `skill description is ${desc.length} chars > ${SKILL_DESCRIPTION_MAX} -> it is listed in every session; say what the skill does and when in a sentence or two, and move trigger catalogues into the body`);
       }
@@ -453,8 +494,37 @@ function checkSkills(root, isIgnored, add) {
       }
     }
   }
+  let workflows = 0;
+  let files = [];
+  try {
+    files = readdirSync(join2(root, WORKFLOW_DIR)).filter((f) => /\.m?js$/.test(f)).sort();
+  } catch {}
+  for (const f of files) {
+    const rel = join2(WORKFLOW_DIR, f);
+    if (isIgnored(rel))
+      continue;
+    const file = join2(root, rel);
+    const src = readFileSync2(file, "utf8");
+    const desc = workflowMetaField(src, "description");
+    if (!desc)
+      continue;
+    const when = workflowMetaField(src, "whenToUse");
+    workflows++;
+    listing += tokensOf(workflowMetaField(src, "name") + desc + when) + LISTING_ENTRY_TOKENS;
+    if (!firstDir)
+      firstDir = file;
+    if (desc.length + when.length > SKILL_DESCRIPTION_MAX) {
+      add(file, 0, "warn", `workflow listing text (meta.description + meta.whenToUse) is ${desc.length + when.length} chars > ${SKILL_DESCRIPTION_MAX} -> it is listed in every session; say what it does and when in a sentence or two, and move argument detail into a comment or doc the workflow points at`);
+    }
+  }
   if (listing > SKILL_LISTING_TOKEN_WARN) {
-    add(firstDir, 0, "warn", `project skill listing ~${listing} tokens across ${count} skills > ${SKILL_LISTING_TOKEN_WARN} -> it loads every session; trim descriptions, merge overlapping skills, and hide skills people start by hand from the model where the agent supports it (e.g. Claude Code's disable-model-invocation)`);
+    const plugins = enabledPlugins(root);
+    const what = [plural(count, "skill", "skills"), ...workflows ? [plural(workflows, "workflow", "workflows")] : []].join(" + ");
+    const notCounted = [
+      ...hidden ? [`${plural(hidden, "hidden skill", "hidden skills")}, which are not listed`] : [],
+      ...plugins.length ? [`skills of enabled plugin(s) ${plugins.join(", ")}`] : []
+    ];
+    add(firstDir, 0, "warn", `project skill/workflow listing ~${listing} tokens across ${what} > ${SKILL_LISTING_TOKEN_WARN}${notCounted.length ? ` (not counted: ${notCounted.join("; ")})` : ""} -> it loads every session; trim descriptions, merge overlapping skills, and hide skills people start by hand from the model where the agent supports it (e.g. Claude Code's disable-model-invocation)`);
   }
 }
 function checkRootImport(file, hasContextDir, add) {

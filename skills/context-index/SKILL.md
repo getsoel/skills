@@ -44,7 +44,7 @@ Curate the repo's lazy-loaded knowledge: a minimal root `CLAUDE.md`, one eager `
 
 Every always-loaded token competes with the task, and lazy files are only lazy if their triggers are narrow.
 
-- **Always loaded:** root `CLAUDE.md` + `context/index.md`, ~2.5k tokens combined. Project skill descriptions also load every session: keep each under 500 chars.
+- **Always loaded:** root `CLAUDE.md` + `context/index.md`, ~2.5k tokens combined. Every listed skill and workflow (Claude Code's `.claude/workflows/*.js` `meta.description` + `whenToUse`) also loads every session, at ~75 tokens per entry on top of its text: keep each under 500 chars and the whole listing under ~3k.
 - **Loaded on touch:** a colocated `<dir>/CLAUDE.md` loads together with every colocated CLAUDE.md above it. Keep each file under ~2.5k tokens and the whole stack under ~6k. When a file outgrows that, move runbook and reference detail into a `context/<topic>.md` behind a specific trigger - NOT into a deeper nested CLAUDE.md, which only lengthens the stack.
 - **Loaded on match:** a topic doc under ~5k tokens. A doc with a broad trigger effectively loads every session - give it specific triggers or move its always-needed lines into `CLAUDE.md`.
 - **Loaded on invocation:** a SKILL.md loads whole, and only its first ~5k tokens survive a compaction. Put rules first; move reference detail into `references/`. A skill people start by hand should be hidden from the model where the agent supports it (e.g. Claude Code's `disable-model-invocation`), so its description stops loading every session.
@@ -72,7 +72,7 @@ Distill the current session into durable instructions.
 Retroactively sweep the EXISTING corpus. `reflect` distills THIS session forward; `audit` re-triages what's already saved - its footguns, and what it costs to load.
 
 1. **Harvest footguns.** Run `context-index footguns --json`. It lists every documented footgun in four ranked categories: A invariant-without-guard (highest signal); D scriptable-procedure; B gotcha/pitfall sections; C hazard phrases ("silently", "passes ... but"). Read-only.
-2. **Harvest load cost.** Run `context-index check --json` and collect the load-cost warnings (`references/validation.md` -> Load cost): always-loaded layer, read-ahead directives, broad triggers, oversized colocated files and stacks, long packed lines, skill descriptions, SKILL.md bodies, skill listing.
+2. **Harvest load cost.** Run `context-index check --json` and collect the load-cost warnings (`references/validation.md` -> Load cost): always-loaded layer, read-ahead directives, broad triggers, oversized colocated files and stacks, long packed lines, skill and workflow descriptions, SKILL.md bodies, the skill/workflow listing.
 3. **Triage.** Footguns go through "Prefer the fix over the note" (`references/reflect-heuristics.md`): (1) root-cause code fix, (2) harness check, or (3) an anchored doc when neither is feasible. Load-cost findings get a concrete trim: rewrite the directive, narrow the trigger, move named sections into a topic doc, shorten the description, split a SKILL.md into `references/`, or hide a hand-started skill from the model. Rank category A footguns and the always-loaded findings first.
 4. **Confirm.** Present ranked proposals in one batch with the evidence (`file:line` + excerpt, tokens before -> after). NEVER auto-apply - the user approves per item.
 5. **Apply approved, then verify.** Run `context-index check`; resolve every error before done.
