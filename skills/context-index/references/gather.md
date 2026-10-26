@@ -51,13 +51,14 @@ Adjacency is what makes this safe. A re-recorded turn is immediately consecutive
 
 ## Friction ledger
 
-reflect's repetition gate needs to know whether a failure happened before, and one session cannot tell it. So `gather` normalizes each `ERR` row to a signature - paths, numbers, ids, tokens and quoted values replaced, stack framing skipped - and records which sessions produced it in a ledger at `<git common dir>/context-index/friction.jsonl`.
+reflect's repetition gate needs to know whether a failure happened before, and one session cannot tell it. So `gather` normalizes each `ERR` row to a signature - paths, numbers, ids, tokens and quoted values replaced, stack framing skipped - and records which sessions produced it in a per-repo ledger.
 
-- **Shared and private.** The git common dir is shared by every worktree of the repo and is never committed.
+- **One ledger per repo, not per checkout.** It is keyed on the normalized `origin` remote and kept at `~/.claude/context-index/ledgers/<host-org-repo>.jsonl`, so side-by-side clones and worktrees share it - on one team's repo, a per-clone ledger saw 199 of 689 sessions. A repo with no `origin` falls back to `<git common dir>/context-index/friction.jsonl`. Never inside the work tree, so never committed.
+- **Repo problems only.** A user rejecting a tool call is a decision, and the agent harness's own preconditions (edit before read, a stale `old_string`) are not repo footguns - neither is recorded.
 - **Annotates the digest.** An `ERR` row whose signature appeared in earlier sessions reads `[seen in N earlier sessions]`. `--json` adds a `friction` array with each row's signature and count.
 - **Idempotent.** A signature is recorded once per session, so re-gathering never inflates a count.
 - **Signatures only.** It stores the normalized one-line signature, never the digest or the transcript.
-- `--backfill` seeds it from every past session filed under the working directory, so the gate works from the first reflect. `--no-ledger` skips it.
+- `--backfill` seeds it from every past session of the repo - any clone or worktree, matched by the directory each session ran in - so the gate works from the first reflect. `--no-ledger` skips it.
 
 User corrections are not signatured: their wording varies too much for a deterministic key. reflect checks those against existing docs and handoffs.
 

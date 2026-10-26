@@ -8,16 +8,21 @@
  *
  * Each `ERR` row is normalized to a signature (paths, numbers, ids and quoted
  * values stripped), and the ledger records which sessions produced which
- * signature. It lives in the repo's git common dir, so it is shared by every
- * worktree of the repo, survives across sessions, and can never be committed.
+ * signature. It is keyed on the repo's `origin` remote and kept under
+ * `~/.claude/context-index/ledgers/`, so every clone and worktree of the repo
+ * shares one ledger (teams often run several clones side by side, and a per-clone
+ * ledger would see a fraction of the sessions), it survives across sessions, and
+ * it can never be committed. A repo with no `origin` falls back to its git
+ * common dir, which worktrees still share.
  * User corrections are NOT signatured: their wording varies too much for a
  * deterministic key, and the skill matches those against docs and handoffs.
  */
 
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { claudeProjectDir, gatherDigest, type GatherResult } from "./gather";
+import { claudeProjectsRoot, digestTranscript, type GatherResult } from "./gather";
 
 /** Lines that say what went wrong, in preference to the first line of output. */
 const ERROR_LINE =
@@ -26,11 +31,20 @@ const ERROR_LINE =
 /** Framing that matches ERROR_LINE but never says what failed: markdown headers (MCP errors open with `### Error`) and stack traces. */
 const FRAME_LINE = /^(#+ |traceback \(most recent call last\)|at |node:internal|file "|\^|throw )/i;
 
+/**
+ * Failures that are never a repo footgun: the user declining a tool call (a
+ * decision, not friction) and the agent harness's own preconditions (edit before
+ * read, a stale old_string). Counting them would put "seen in 59 earlier
+ * sessions" on noise and bury the repeats that point at something fixable.
+ */
+const HARNESS_NOISE =
+  /doesn't want to proceed with this tool use|tool use was rejected|<tool_use_error>(string to replace not found|file has not been read yet|file has been modified since read|found \d+ matches of the string)/i;
+
 const MAX_SIGNATURE_CHARS = 120;
 
 /**
  * Reduce a tool error to a stable signature, or null when nothing in it is
- * worth keying on.
+ * worth keying on - including a user rejection or an agent-harness precondition.
  *
  * The same failure in two sessions differs in paths, ids, line numbers, pids and
  * quoted values; those are replaced with placeholders so the two collapse to one
@@ -38,6 +52,7 @@ const MAX_SIGNATURE_CHARS = 120;
  * line that names an error is the signal.
  */
 export function signatureOf(error: string): string | null {
+  if (HARNESS_NOISE.test(error)) return null;
   const lines = error
     .split("\n")
     .map((l) => l.trim())
@@ -47,7 +62,7 @@ export function signatureOf(error: string): string | null {
   const sig = pick
     .replace(/\u001b\[[0-9;]*m/g, "")
     .replace(/https?:\/\/\S+/g, "<url>")
-    .replace(/(?:~|\.{1,2})?\/[\w.@~+-]+(?:\/[\w.@~+-]*)+/g, "<path>")
+    .replace(/(?<![\w.@~+-])(?:~|\.{1,2})?\/[\w.@~+-]+(?:\/[\w.@~+-]*)+/g, "<path>")
     .replace(/\b[\w.@~+-]+(?:\/[\w.@~+-]+)+\/?/g, "<path>")
     .replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "<id>")
     .replace(/\b[A-Za-z0-9+/_-]{24,}={0,2}/g, "<id>")
@@ -60,20 +75,40 @@ export function signatureOf(error: string): string | null {
   return sig ? sig.slice(0, MAX_SIGNATURE_CHARS) : null;
 }
 
-/** Where the ledger lives for the repo containing `cwd`, or null outside a git repo. */
-export function ledgerPath(cwd: string = process.cwd()): string | null {
-  let common: string;
+function git(cwd: string, args: string[]): string | null {
   try {
-    common = execFileSync("git", ["rev-parse", "--git-common-dir"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
   } catch {
     return null;
   }
-  const dir = isAbsolute(common) ? common : resolve(cwd, common);
-  return join(dir, "context-index", "friction.jsonl");
+}
+
+/**
+ * `git@github.com:Org/Repo.git`, `https://user@github.com/org/repo` and
+ * `ssh://git@github.com/org/repo.git` all name one repo: reduce each to
+ * `github.com/org/repo`.
+ */
+export function normalizeRemote(url: string): string {
+  return url
+    .trim()
+    .replace(/^[a-z+]+:\/\//i, "")
+    .replace(/^[^@/]+@/, "")
+    .replace(/^([^/:]+):(?!\d+\/)/, "$1/")
+    .replace(/\.git\/?$/, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+/** Where the ledger lives for the repo containing `cwd`, or null outside a git repo. */
+export function ledgerPath(cwd: string = process.cwd()): string | null {
+  const origin = git(cwd, ["remote", "get-url", "origin"]);
+  if (origin) {
+    const key = normalizeRemote(origin).replace(/[^a-z0-9.]+/g, "-");
+    return join(homedir(), ".claude", "context-index", "ledgers", `${key}.jsonl`);
+  }
+  const common = git(cwd, ["rev-parse", "--git-common-dir"]);
+  if (!common) return null;
+  return join(isAbsolute(common) ? common : resolve(cwd, common), "context-index", "friction.jsonl");
 }
 
 interface LedgerEntry {
@@ -148,25 +183,58 @@ export function recordFriction(result: GatherResult, path: string): Map<number, 
   return sightings;
 }
 
-/**
- * Seed the ledger from every past session filed under `cwd`'s project
- * directory, so the repetition gate works from the first reflect instead of
- * after weeks of accumulation. Returns the number of sessions read.
- */
-export function backfillLedger(path: string, cwd: string = process.cwd()): number {
-  let entries: string[];
+/** The working directory a transcript was recorded in, from its first lines that carry one. */
+function transcriptCwd(path: string): string | null {
+  let head: string;
   try {
-    entries = readdirSync(claudeProjectDir(cwd));
+    head = readFileSync(path, "utf8").slice(0, 64_000);
+  } catch {
+    return null;
+  }
+  for (const raw of head.split("\n")) {
+    try {
+      const line = JSON.parse(raw) as { cwd?: unknown };
+      if (typeof line.cwd === "string") return line.cwd;
+    } catch {
+      // A partial line at the slice boundary.
+    }
+  }
+  return null;
+}
+
+/**
+ * Seed the ledger from every past session of this repo - in any clone or
+ * worktree, wherever Claude Code filed it - so the repetition gate works from
+ * the first reflect instead of after weeks of accumulation. A session belongs
+ * to the repo when the directory it ran in resolves to this ledger. Returns
+ * the number of sessions read.
+ */
+export function backfillLedger(path: string): number {
+  let dirs: string[];
+  try {
+    dirs = readdirSync(claudeProjectsRoot());
   } catch {
     return 0;
   }
+  const owner = new Map<string, string | null>();
   let n = 0;
-  for (const entry of entries.sort()) {
-    if (!entry.endsWith(".jsonl")) continue;
-    const result = gatherDigest({ sessionId: entry.slice(0, -".jsonl".length), cwd });
-    if (!result.transcript) continue;
-    recordFriction(result, path);
-    n++;
+  for (const dir of dirs.sort()) {
+    let entries: string[];
+    try {
+      entries = readdirSync(join(claudeProjectsRoot(), dir));
+    } catch {
+      continue;
+    }
+    for (const entry of entries.sort()) {
+      if (!entry.endsWith(".jsonl")) continue;
+      const transcript = join(claudeProjectsRoot(), dir, entry);
+      const cwd = transcriptCwd(transcript);
+      if (!cwd) continue;
+      if (!owner.has(cwd)) owner.set(cwd, existsSync(cwd) ? ledgerPath(cwd) : null);
+      if (owner.get(cwd) !== path) continue;
+      recordFriction(digestTranscript(transcript, entry.slice(0, -".jsonl".length)), path);
+      n++;
+    }
   }
   return n;
 }

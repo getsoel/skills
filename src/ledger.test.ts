@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GatherResult } from "./gather";
-import { recordFriction, signatureOf } from "./ledger";
+import { normalizeRemote, recordFriction, signatureOf } from "./ledger";
 
 function session(id: string, errors: string[]): GatherResult {
   return {
@@ -41,6 +41,9 @@ describe("signatureOf", () => {
     expect(signatureOf("(eval):cd:1: no such file or directory: services/api")).toBe(
       signatureOf("(eval):cd:1: no such file or directory: apps/platform-admin"),
     );
+    expect(signatureOf("(eval):cd:1: no such file or directory: services/api/src/jobs")).toBe(
+      "(eval):cd:n: no such file or directory: <path>",
+    );
   });
 
   it("keeps apostrophes inside words", () => {
@@ -49,6 +52,12 @@ describe("signatureOf", () => {
 
   it("strips tokens and ids so no secret becomes a key", () => {
     expect(signatureOf("401 unauthorized for token ghp_abcdefghijklmnopqrstuvwxyz0123")).not.toContain("ghp_");
+  });
+
+  it("skips rejections and agent-harness preconditions", () => {
+    expect(signatureOf("The user doesn't want to proceed with this tool use. The tool use was rejected.")).toBeNull();
+    expect(signatureOf("<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>")).toBeNull();
+    expect(signatureOf("<tool_use_error>String to replace not found in file.\nString: foo</tool_use_error>")).toBeNull();
   });
 
   it("returns null for an error with nothing to key on", () => {
@@ -79,5 +88,22 @@ describe("recordFriction", () => {
     const path = ledger();
     recordFriction(session("s1", [err]), path);
     expect(recordFriction(session("s1", [err]), path).get(0)?.seenBefore).toBe(0);
+  });
+});
+
+describe("normalizeRemote", () => {
+  it("keys every spelling of one remote the same", () => {
+    const want = "github.com/getsoel/skills";
+    for (const url of [
+      "git@github.com:getsoel/skills.git",
+      "https://github.com/getsoel/skills",
+      "https://user@github.com/GetSoel/skills.git/",
+      "ssh://git@github.com/getsoel/skills.git",
+    ])
+      expect(normalizeRemote(url)).toBe(want);
+  });
+
+  it("keeps an explicit port", () => {
+    expect(normalizeRemote("ssh://git@git.example.com:2222/org/repo.git")).toBe("git.example.com:2222/org/repo");
   });
 });

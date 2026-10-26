@@ -327,6 +327,16 @@ export interface GatherOpts extends ResolveOpts {
  */
 export function gatherDigest(opts: GatherOpts = {}): GatherResult {
   const { transcript, sessionId, missing } = resolveTranscript(opts);
+  return digestTranscript(transcript, sessionId, missing, opts.limit);
+}
+
+/** Read and digest a transcript already located on disk. */
+export function digestTranscript(
+  transcript: string | null,
+  sessionId: string | null,
+  missing = false,
+  limit?: number,
+): GatherResult {
   const empty: GatherStats = {
     lines: 0,
     extracted: 0,
@@ -352,8 +362,7 @@ export function gatherDigest(opts: GatherOpts = {}): GatherResult {
   }
 
   const { rows: deduped, removed } = dedupe(extracted);
-  const limited =
-    opts.limit && opts.limit > 0 ? deduped.slice(-opts.limit) : deduped;
+  const limited = limit && limit > 0 ? deduped.slice(-limit) : deduped;
 
   return {
     transcript,

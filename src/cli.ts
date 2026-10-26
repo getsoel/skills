@@ -192,7 +192,7 @@ function runGather(args: Args, json: boolean): void {
   // back to a session-id scan anyway, so this only picks the fast path.
   const ledger = has(args, "--no-ledger") ? null : ledgerPath();
   if (has(args, "--backfill")) {
-    if (!ledger) throw new Error("--backfill needs a git repo (the ledger lives in its git dir)");
+    if (!ledger) throw new Error("--backfill needs a git repo (the ledger is keyed on it)");
     console.log(`Backfilled the friction ledger from ${backfillLedger(ledger)} session(s): ${ledger}`);
     return;
   }

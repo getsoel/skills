@@ -1116,6 +1116,9 @@ function resolveTranscript(opts = {}) {
 }
 function gatherDigest(opts = {}) {
   const { transcript, sessionId, missing } = resolveTranscript(opts);
+  return digestTranscript(transcript, sessionId, missing, opts.limit);
+}
+function digestTranscript(transcript, sessionId, missing = false, limit) {
   const empty = {
     lines: 0,
     extracted: 0,
@@ -1140,7 +1143,7 @@ function gatherDigest(opts = {}) {
       extracted.push(row);
   }
   const { rows: deduped, removed } = dedupe(extracted);
-  const limited = opts.limit && opts.limit > 0 ? deduped.slice(-opts.limit) : deduped;
+  const limited = limit && limit > 0 ? deduped.slice(-limit) : deduped;
   return {
     transcript,
     sessionId,
@@ -1175,32 +1178,43 @@ function formatDigest(result, seen) {
 // src/ledger.ts
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync as existsSync5, mkdirSync, readFileSync as readFileSync5, readdirSync as readdirSync4 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
 import { dirname as dirname2, isAbsolute, join as join5, resolve } from "node:path";
 var ERROR_LINE = /\b(error|fatal|not found|no such|denied|blocked|timed out|cannot|can't|failed|traceback|refused|unauthori[sz]ed|forbidden|no matches|not allowed|invalid)\b/i;
 var FRAME_LINE = /^(#+ |traceback \(most recent call last\)|at |node:internal|file "|\^|throw )/i;
+var HARNESS_NOISE = /doesn't want to proceed with this tool use|tool use was rejected|<tool_use_error>(string to replace not found|file has not been read yet|file has been modified since read|found \d+ matches of the string)/i;
 var MAX_SIGNATURE_CHARS = 120;
 function signatureOf(error) {
+  if (HARNESS_NOISE.test(error))
+    return null;
   const lines = error.split(`
 `).map((l) => l.trim()).filter((l) => l && !/^exit code \d+$/i.test(l) && !FRAME_LINE.test(l));
   if (!lines.length)
     return null;
   const pick = lines.find((l) => ERROR_LINE.test(l)) ?? lines[0];
-  const sig = pick.replace(/\u001b\[[0-9;]*m/g, "").replace(/https?:\/\/\S+/g, "<url>").replace(/(?:~|\.{1,2})?\/[\w.@~+-]+(?:\/[\w.@~+-]*)+/g, "<path>").replace(/\b[\w.@~+-]+(?:\/[\w.@~+-]+)+\/?/g, "<path>").replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "<id>").replace(/\b[A-Za-z0-9+/_-]{24,}={0,2}/g, "<id>").replace(/(["`]).*?\1/g, "<q>").replace(/(^|[\s(=:])'[^']*'/g, "$1<q>").replace(/\d+/g, "N").replace(/\s+/g, " ").toLowerCase().trim();
+  const sig = pick.replace(/\u001b\[[0-9;]*m/g, "").replace(/https?:\/\/\S+/g, "<url>").replace(/(?<![\w.@~+-])(?:~|\.{1,2})?\/[\w.@~+-]+(?:\/[\w.@~+-]*)+/g, "<path>").replace(/\b[\w.@~+-]+(?:\/[\w.@~+-]+)+\/?/g, "<path>").replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "<id>").replace(/\b[A-Za-z0-9+/_-]{24,}={0,2}/g, "<id>").replace(/(["`]).*?\1/g, "<q>").replace(/(^|[\s(=:])'[^']*'/g, "$1<q>").replace(/\d+/g, "N").replace(/\s+/g, " ").toLowerCase().trim();
   return sig ? sig.slice(0, MAX_SIGNATURE_CHARS) : null;
 }
-function ledgerPath(cwd = process.cwd()) {
-  let common;
+function git(cwd, args) {
   try {
-    common = execFileSync("git", ["rev-parse", "--git-common-dir"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim();
+    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
   } catch {
     return null;
   }
-  const dir = isAbsolute(common) ? common : resolve(cwd, common);
-  return join5(dir, "context-index", "friction.jsonl");
+}
+function normalizeRemote(url) {
+  return url.trim().replace(/^[a-z+]+:\/\//i, "").replace(/^[^@/]+@/, "").replace(/^([^/:]+):(?!\d+\/)/, "$1/").replace(/\.git\/?$/, "").replace(/\/+$/, "").toLowerCase();
+}
+function ledgerPath(cwd = process.cwd()) {
+  const origin = git(cwd, ["remote", "get-url", "origin"]);
+  if (origin) {
+    const key = normalizeRemote(origin).replace(/[^a-z0-9.]+/g, "-");
+    return join5(homedir2(), ".claude", "context-index", "ledgers", `${key}.jsonl`);
+  }
+  const common = git(cwd, ["rev-parse", "--git-common-dir"]);
+  if (!common)
+    return null;
+  return join5(isAbsolute(common) ? common : resolve(cwd, common), "context-index", "friction.jsonl");
 }
 function readLedger(path) {
   if (!existsSync5(path))
@@ -1254,22 +1268,53 @@ function recordFriction(result, path) {
   }
   return sightings;
 }
-function backfillLedger(path, cwd = process.cwd()) {
-  let entries;
+function transcriptCwd(path) {
+  let head;
   try {
-    entries = readdirSync4(claudeProjectDir(cwd));
+    head = readFileSync5(path, "utf8").slice(0, 64000);
+  } catch {
+    return null;
+  }
+  for (const raw of head.split(`
+`)) {
+    try {
+      const line = JSON.parse(raw);
+      if (typeof line.cwd === "string")
+        return line.cwd;
+    } catch {}
+  }
+  return null;
+}
+function backfillLedger(path) {
+  let dirs;
+  try {
+    dirs = readdirSync4(claudeProjectsRoot());
   } catch {
     return 0;
   }
+  const owner = new Map;
   let n = 0;
-  for (const entry of entries.sort()) {
-    if (!entry.endsWith(".jsonl"))
+  for (const dir of dirs.sort()) {
+    let entries;
+    try {
+      entries = readdirSync4(join5(claudeProjectsRoot(), dir));
+    } catch {
       continue;
-    const result = gatherDigest({ sessionId: entry.slice(0, -".jsonl".length), cwd });
-    if (!result.transcript)
-      continue;
-    recordFriction(result, path);
-    n++;
+    }
+    for (const entry of entries.sort()) {
+      if (!entry.endsWith(".jsonl"))
+        continue;
+      const transcript = join5(claudeProjectsRoot(), dir, entry);
+      const cwd = transcriptCwd(transcript);
+      if (!cwd)
+        continue;
+      if (!owner.has(cwd))
+        owner.set(cwd, existsSync5(cwd) ? ledgerPath(cwd) : null);
+      if (owner.get(cwd) !== path)
+        continue;
+      recordFriction(digestTranscript(transcript, entry.slice(0, -".jsonl".length)), path);
+      n++;
+    }
   }
   return n;
 }
@@ -1512,7 +1557,7 @@ function runGather(args, json) {
   const ledger = has(args, "--no-ledger") ? null : ledgerPath();
   if (has(args, "--backfill")) {
     if (!ledger)
-      throw new Error("--backfill needs a git repo (the ledger lives in its git dir)");
+      throw new Error("--backfill needs a git repo (the ledger is keyed on it)");
     console.log(`Backfilled the friction ledger from ${backfillLedger(ledger)} session(s): ${ledger}`);
     return;
   }
