@@ -52,7 +52,7 @@ node .claude/skills/context-index/scripts/context-index.mjs check --quiet
 
 | Command | Does |
 | --- | --- |
-| `check` | Validates the corpus: orphans, dangling pointers, eager `@` imports, missing "Use when:" triggers, line and token budgets, trigger overlap and drift. Also flags load cost: read-ahead directives, broad triggers, stacked nested `CLAUDE.md` files, and oversized project skill descriptions and bodies. Exits 1 on errors. |
+| `check` | Validates the corpus: orphans, dangling pointers, eager `@` imports, missing "Use when:" triggers, line and token budgets, trigger overlap and drift. Also flags load cost: read-ahead directives, broad triggers, stacked nested `CLAUDE.md` files, oversized project skill and workflow descriptions, the size of the skill/workflow listing, and oversized skill bodies. Exits 1 on errors. |
 | `ls` | Lists the index tree |
 | `scaffold <name> "<trigger>"` | Creates a topic doc and wires its index entry |
 | `footguns` | Lists documented footguns, ranked |

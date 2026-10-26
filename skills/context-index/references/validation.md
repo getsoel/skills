@@ -8,7 +8,7 @@
 - `--quiet` prints only errors (warnings are still counted) - use it when wiring the check into a commit hook or CI.
 - Exclude foreign instruction files (legacy/demo/vendored `CLAUDE.md` the repo doesn't own): add literal paths (no globs) to a `.contextignore` at the repo root, one per line - e.g. `_legacy`, `expo/sports`. A bare name matches that dir/file at any depth; a path with a `/` anchors to the root and skips it plus anything beneath. Use `--ignore <a,b>` for one-offs. Ignore only files you don't author - never to silence real violations in your own corpus.
 
-Scope: root `CLAUDE.md`, the index tree (`context/index.md` plus every `context/<area>/index.md` it lists), every `context/**/*.md`, colocated `**/CLAUDE.md`, and project skills under `.claude/skills/*/SKILL.md` and `.agents/skills/*/SKILL.md`.
+Scope: root `CLAUDE.md`, the index tree (`context/index.md` plus every `context/<area>/index.md` it lists), every `context/**/*.md`, colocated `**/CLAUDE.md`, and project skills under `.claude/skills/*/SKILL.md` and `.agents/skills/*/SKILL.md`, and Claude Code workflows under `.claude/workflows/`.
 
 ## Errors
 
@@ -29,7 +29,8 @@ Load cost - what a session pays without asking for it:
 - Prose lines over 400 chars in an auto-loaded file - a paragraph packed onto one line, so the line budget understates the file
 - An index directive that reads ahead ("when in doubt", "always read") - every arguable trigger becomes eager
 - A broad trigger ("navigating", "overview", "any task", "locating which package owns code") on a doc over ~1.5k tokens - it fires on nearly every task
-- A skill description over 500 chars, a SKILL.md over ~5k tokens (it loads whole on invocation and only its first ~5k survive a compaction), or a project skill listing over ~3k tokens
+- A skill description, or a workflow's `meta.description` + `meta.whenToUse`, over 500 chars; a SKILL.md over ~5k tokens (it loads whole on invocation and only its first ~5k survive a compaction)
+- A skill/workflow listing over ~3k tokens: every visible project skill plus every `.claude/workflows/*.js` entry, at chars/3 + ~75 tokens per entry (measured: hiding six skills of 2,810 chars cut a Claude Code first request by 1,387 tokens). Skills hidden with `disable-model-invocation: true` are left out of the total and named; skills of plugins enabled in `.claude/settings.json` are listed too but live outside the repo, so they are named, not counted
 
 Hygiene:
 
