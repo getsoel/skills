@@ -1,0 +1,7 @@
+schema_version: "1.1"
+name: audit-load-cost
+description: An existing corpus that passes every line budget but loads far more than it should.
+tags: [load-cost, audit]
+expected_outcome: The audit names the read-ahead directive, the catch-all architecture trigger, the oversized nested CLAUDE.md stack, and the bloated skill.
+context:
+  scaffold_script: scaffold.sh

@@ -1,0 +1,7 @@
+schema_version: "1.1"
+name: reflect-over-budget-stack
+description: New directory-scoped rules for a nested CLAUDE.md that passes its line budget but is already over its token budget.
+tags: [load-cost, reflect]
+expected_outcome: The rules are captured, and the nested CLAUDE.md ends under its token budget - long-form history moved into a context/ doc behind a specific trigger.
+context:
+  scaffold_script: scaffold.sh

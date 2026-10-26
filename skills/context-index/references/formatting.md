@@ -11,7 +11,9 @@ Rules for any instruction text: SKILL.md, README, CLAUDE.md, index entries, topi
 
 ## Length
 
-- General instruction files and topic docs: <200 lines
+- General instruction files and topic docs: <200 lines, and ~5k tokens for a topic doc
+- Budget in tokens as well as lines - never pack paragraphs onto long lines to meet a line budget; the validator flags prose lines over 400 chars in auto-loaded files
+- Skill descriptions: under 500 chars - they are listed in every session
 - CLAUDE.md: <100 lines ideal (see `references/claude-md-structure.md`)
 - Performance degrades as context accumulates; extract when a doc grows past its budget
 
@@ -36,7 +38,7 @@ Rules for any instruction text: SKILL.md, README, CLAUDE.md, index entries, topi
 - Fold unique keywords (frameworks, error codes, file patterns, symptoms like "401/403" or "hydration error") into the trigger - that's where they match
 - Triggers route loading, so favor LITERAL lexical cues (task verbs, file globs, error codes, symbol names) over abstract topic descriptions - models match literal overlap far more reliably than latent semantics, and semantic-only matching is the regime that degrades most as context fills
 - OPTIONAL path-scoped activation: append `` ; paths: `<glob>`, `<glob>` `` after the trigger to deterministically match files (Cursor `globs`-style). Backtick each glob; `*` stays within a path segment, `**` crosses `/`. The validator flags a glob whose directory no longer exists; the skill's optional `inject-context` hook (Claude Code) can surface the doc when a matching file is edited. The prose trigger stays PRIMARY - globs only cover the path-shaped subset, not symptom/concept triggers
-- Keep the index small: aim for <=15-20 entries. It loads eagerly every session, so a long flat index becomes its own attention drain. Past that, split by area into nested indexes rather than growing one list: each area's docs under `context/<area>/`, listed by a `context/<area>/index.md` that the root index lists (SKILL.md §Nested indexes)
+- Keep the index small: aim for <=15-20 entries. It loads eagerly every session, so a long flat index becomes its own attention drain. Past that, split by area into nested indexes rather than growing one list: each area's docs under `context/<area>/`, listed by a `context/<area>/index.md` that the root index lists (`references/nested-indexes.md`)
 
 ## Anti-patterns
 

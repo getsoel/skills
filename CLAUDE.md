@@ -7,6 +7,7 @@ Public Agent Skills repo. Each skill lives in `skills/<name>/` and MUST satisfy 
 - `bun test` - unit tests, spec checks, and bundle tests under Node
 - `bun run build` - rebuild `skills/context-index/scripts/context-index.mjs` from `src/`
 - `bun run check` - typecheck + test + build + fail on a stale bundle (what CI runs)
+- `evals/run.sh [<git ref>] [-- <plugin eval args>]` - behavioral evals via `claude plugin eval` (paid agent runs; pass a ref such as `main` to score an older skill). Results land in `evals/results/` (gitignored)
 
 ## Constraints
 

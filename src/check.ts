@@ -46,10 +46,44 @@ const BUDGET: Record<string, { warn: number; err: number }> = {
   topic: { warn: 150, err: 200 },
 };
 
+// Lines are a proxy for size, and a gameable one: 199 lines of 1,000-char prose pass a line
+// budget at ten times its cost. Tokens are the cost that loads, so they get a budget too.
+const TOKEN_BUDGET: Record<string, { warn: number; err: number }> = {
+  colocated: { warn: 2500, err: 5000 },
+  topic: { warn: 5000, err: 10000 },
+};
+
+// Dense instruction markdown (paths, backticks, flags) tokenizes nearer 2.5 chars/token than
+// the 4 usually quoted. Erring low is what lets an over-budget file pass, so estimate at 3.
+const CHARS_PER_TOKEN = 3;
+
 const INDEX_SOFT_MAX = 20;
 
-// Approx tokens (chars/4) for the always-loaded layer (root CLAUDE.md + eager index).
 const ALWAYS_LOADED_TOKEN_WARN = 2500;
+
+// A prose line this long is a paragraph packed onto one line, usually to stay under a line
+// budget. Checked only in files that load without being asked for; a topic doc's token budget
+// already covers it.
+const LONG_LINE = 400;
+
+// A colocated CLAUDE.md loads together with every colocated CLAUDE.md above it, so the cost of
+// touching a file is the whole ancestor stack, not the nearest file.
+const STACK_TOKEN_WARN = 6000;
+
+// Index prose telling the agent to read docs before a trigger matches. It turns every lazy doc
+// whose trigger is arguable into an eager one.
+const READ_AHEAD = /\bwhen in doubt\b|\bif (?:in doubt|unsure)\b|\balways read\b|\bread (?:all|every|each) (?:of )?(?:the )?(?:entr|doc|file)/i;
+
+// Trigger wording that matches nearly any task. Harmless on a short doc, costly on a long one.
+const BROAD_TRIGGER = /\b(?:navigat\w*|overview|orientation|getting started|any (?:task|change|work)|every (?:task|change)|locating (?:which|where|an?|the) (?:app|service|package|module|code)\w*)\b/i;
+const BROAD_DOC_TOKENS = 1500;
+
+// Skill descriptions are listed in every session; bodies load whole on invocation, and only
+// their first ~5k tokens survive a compaction.
+const SKILL_DIRS = [".claude/skills", ".agents/skills"];
+const SKILL_DESCRIPTION_MAX = 500;
+const SKILL_BODY_TOKEN_WARN = 5000;
+const SKILL_LISTING_TOKEN_WARN = 3000;
 
 // Style hygiene is deliberately light: em dashes and smart typography are a repo's own
 // house-style choice, so only genuinely decorative status glyphs are flagged, and only as a
@@ -106,8 +140,10 @@ function keywords(text: string): Set<string> {
   return out;
 }
 
+const tokensOf = (text: string): number => Math.round(text.length / CHARS_PER_TOKEN);
+
 function approxTokens(file: string): number {
-  try { return Math.round(readFileSync(file, "utf8").length / 4); } catch { return 0; }
+  try { return tokensOf(readFileSync(file, "utf8")); } catch { return 0; }
 }
 
 function classify(root: string, file: string): Kind {
@@ -177,6 +213,131 @@ function checkLength(file: string, kind: Kind, add: AddFn): void {
   const n = readFileSync(file, "utf8").split("\n").length;
   if (n > b.err) add(file, n, "error", `${n} lines > ${b.err} budget for a ${kind} file -> extract content`);
   else if (n > b.warn) add(file, n, "warn", `${n} lines > ${b.warn} (ideal) for a ${kind} file`);
+}
+
+function checkTokens(file: string, kind: Kind, add: AddFn): void {
+  const b = TOKEN_BUDGET[kind];
+  if (!b) return;
+  const t = approxTokens(file);
+  const where = kind === "colocated"
+    ? "move runbook and reference detail into context/ docs, keeping the rules here"
+    : "split it by situation so each trigger loads only what it needs";
+  if (t > b.err) add(file, 0, "error", `~${t} tokens > ${b.err} budget for a ${kind} file -> ${where}`);
+  else if (t > b.warn) add(file, 0, "warn", `~${t} tokens > ${b.warn} (ideal) for a ${kind} file -> ${where}`);
+}
+
+function checkLongLines(file: string, add: AddFn): void {
+  const lines = readFileSync(file, "utf8").split("\n");
+  let inFence = false;
+  let count = 0, longest = 0, first = 0;
+  for (let n = 0; n < lines.length; n++) {
+    const line = lines[n];
+    const tok = line.trimStart().slice(0, 3);
+    if (tok === "```" || tok === "~~~") { inFence = !inFence; continue; }
+    if (inFence || line.trimStart().startsWith("|")) continue;
+    if (line.length <= LONG_LINE) continue;
+    count++;
+    if (!first) first = n + 1;
+    longest = Math.max(longest, line.length);
+  }
+  if (count) {
+    add(file, first, "warn", `${count} line(s) over ${LONG_LINE} chars (longest ${longest}) -> the line count understates this file's size; break up the paragraphs or move the detail out`);
+  }
+}
+
+// Each colocated CLAUDE.md plus every colocated CLAUDE.md above it: what loads together when a
+// file in that directory is touched. Root CLAUDE.md is excluded - it is already always loaded.
+function checkStacks(root: string, colocated: string[], add: AddFn): void {
+  const tokens = new Map(colocated.map((f) => [dirname(relative(root, f)), approxTokens(f)]));
+  for (const file of colocated) {
+    let dir = dirname(relative(root, file));
+    const stack: string[] = [];
+    let total = 0;
+    while (dir !== "." && dir !== "") {
+      const t = tokens.get(dir);
+      if (t !== undefined) { stack.push(dir); total += t; }
+      dir = dirname(dir);
+    }
+    if (stack.length > 1 && total > STACK_TOKEN_WARN) {
+      add(file, 0, "warn", `loads with ${plural(stack.length - 1, "ancestor CLAUDE.md", "ancestor CLAUDE.md files")} (${stack.slice(1).join(", ")}) for ~${total} tokens > ${STACK_TOKEN_WARN} -> slim the stack; move detail into context/ docs rather than another nested CLAUDE.md`);
+    }
+  }
+}
+
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+
+// Directive lines in an index (not its entries) that tell the agent to read ahead.
+function checkReadAhead(file: string, add: AddFn): void {
+  readFileSync(file, "utf8").split("\n").forEach((line, i) => {
+    if (/^\s*-\s+/.test(line)) return;
+    const m = prose(line).match(READ_AHEAD);
+    if (m) {
+      add(file, i + 1, "warn", `directive tells the agent to read ahead ("${m[0]}") -> route only on a matching "Use when"; a doc read ahead loads on tasks that never needed it`);
+    }
+  });
+}
+
+function checkBroadTriggers(root: string, entries: TreeEntry[], add: AddFn): void {
+  for (const e of entries) {
+    if (!e.path.startsWith("context/") || isIndexPath(e.path)) continue;
+    const m = e.trigger.match(BROAD_TRIGGER);
+    if (!m) continue;
+    const t = approxTokens(join(root, e.path));
+    if (t > BROAD_DOC_TOKENS) {
+      add(join(root, e.index), e.line, "warn", `broad trigger ("${m[0]}") routes a ~${t}-token doc onto nearly every task -> name the specific situations it serves, or move the always-needed lines into CLAUDE.md`);
+    }
+  }
+}
+
+// The `description:` value from SKILL.md frontmatter: inline (quoted or not), or a `>`/`|` block.
+function skillDescription(text: string): string {
+  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return "";
+  const lines = fm[1].split(/\r?\n/);
+  const i = lines.findIndex((l) => /^description:/.test(l));
+  if (i === -1) return "";
+  const inline = lines[i].replace(/^description:\s*/, "");
+  if (inline && !/^[>|][-+]?$/.test(inline)) return inline.replace(/^(["'])([\s\S]*)\1$/, "$2");
+  const block: string[] = [];
+  for (const l of lines.slice(i + 1)) {
+    if (!/^\s/.test(l)) break;
+    block.push(l.trim());
+  }
+  return block.join(" ");
+}
+
+function checkSkills(root: string, isIgnored: (rel: string) => boolean, add: AddFn): void {
+  let listing = 0, count = 0;
+  let firstDir = "";
+  for (const base of SKILL_DIRS) {
+    let dirs;
+    try {
+      dirs = readdirSync(join(root, base), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of dirs) {
+      const rel = join(base, d.name);
+      if (!d.isDirectory() || isIgnored(rel)) continue;
+      const file = join(root, rel, "SKILL.md");
+      if (!existsSync(file)) continue;
+      const text = readFileSync(file, "utf8");
+      const desc = skillDescription(text);
+      count++;
+      listing += tokensOf(d.name + desc);
+      if (!firstDir) firstDir = file;
+      if (desc.length > SKILL_DESCRIPTION_MAX) {
+        add(file, 0, "warn", `skill description is ${desc.length} chars > ${SKILL_DESCRIPTION_MAX} -> it is listed in every session; say what the skill does and when in a sentence or two, and move trigger catalogues into the body`);
+      }
+      const t = tokensOf(text);
+      if (t > SKILL_BODY_TOKEN_WARN) {
+        add(file, 0, "warn", `SKILL.md ~${t} tokens > ${SKILL_BODY_TOKEN_WARN} -> it loads whole when invoked and only its first ~${SKILL_BODY_TOKEN_WARN} tokens survive a compaction; put the rules first and move reference detail into references/ files`);
+      }
+    }
+  }
+  if (listing > SKILL_LISTING_TOKEN_WARN) {
+    add(firstDir, 0, "warn", `project skill listing ~${listing} tokens across ${count} skills > ${SKILL_LISTING_TOKEN_WARN} -> it loads every session; trim descriptions, merge overlapping skills, and hide skills people start by hand from the model where the agent supports it (e.g. Claude Code's disable-model-invocation)`);
+  }
 }
 
 function checkRootImport(file: string, hasContextDir: boolean, add: AddFn): void {
@@ -433,11 +594,16 @@ export function checkContext(root: string, opts: ContextOptions = {}): ContextRe
   const contextDir = join(root, "context");
   const hasContextDir = existsSync(contextDir) && statSync(contextDir).isDirectory();
 
+  const colocated: string[] = [];
   for (const file of walk(root, root, [], isIgnored, ignored)) {
     const kind = classify(root, file);
     if (kind === "skip" || kind === "other") continue;
+    if (kind === "colocated") colocated.push(file);
+    if (kind === "index") checkReadAhead(file, add);
     checkText(file, add);
     checkLength(file, kind, add);
+    checkTokens(file, kind, add);
+    if (kind !== "topic") checkLongLines(file, add);
     checkStaleProse(file, kind, add);
     checkNoFencedCode(file, kind, add);
     if (kind === "root") {
@@ -455,6 +621,7 @@ export function checkContext(root: string, opts: ContextOptions = {}): ContextRe
       entryCount = tree.entries.length;
       indexCount = tree.indexes.length;
       checkTriggerDrift(root, tree.entries, add);
+      checkBroadTriggers(root, tree.entries, add);
     }
     checkDuplicates(root, contextDir, add);
     const rootClaude = join(root, "CLAUDE.md");
@@ -465,6 +632,9 @@ export function checkContext(root: string, opts: ContextOptions = {}): ContextRe
       }
     }
   }
+
+  checkStacks(root, colocated, add);
+  checkSkills(root, isIgnored, add);
 
   return { findings, entries: entryCount, indexes: indexCount, fixed, ignored };
 }

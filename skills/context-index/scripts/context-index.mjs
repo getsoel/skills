@@ -132,8 +132,22 @@ var BUDGET = {
   colocated: { warn: 150, err: 200 },
   topic: { warn: 150, err: 200 }
 };
+var TOKEN_BUDGET = {
+  colocated: { warn: 2500, err: 5000 },
+  topic: { warn: 5000, err: 1e4 }
+};
+var CHARS_PER_TOKEN = 3;
 var INDEX_SOFT_MAX = 20;
 var ALWAYS_LOADED_TOKEN_WARN = 2500;
+var LONG_LINE = 400;
+var STACK_TOKEN_WARN = 6000;
+var READ_AHEAD = /\bwhen in doubt\b|\bif (?:in doubt|unsure)\b|\balways read\b|\bread (?:all|every|each) (?:of )?(?:the )?(?:entr|doc|file)/i;
+var BROAD_TRIGGER = /\b(?:navigat\w*|overview|orientation|getting started|any (?:task|change|work)|every (?:task|change)|locating (?:which|where|an?|the) (?:app|service|package|module|code)\w*)\b/i;
+var BROAD_DOC_TOKENS = 1500;
+var SKILL_DIRS = [".claude/skills", ".agents/skills"];
+var SKILL_DESCRIPTION_MAX = 500;
+var SKILL_BODY_TOKEN_WARN = 5000;
+var SKILL_LISTING_TOKEN_WARN = 3000;
 var DECORATIVE = [
   { re: /[✓✗✅❌]/g, name: "decorative check/cross glyph" }
 ];
@@ -224,9 +238,10 @@ function keywords(text) {
   }
   return out;
 }
+var tokensOf = (text) => Math.round(text.length / CHARS_PER_TOKEN);
 function approxTokens(file) {
   try {
-    return Math.round(readFileSync2(file, "utf8").length / 4);
+    return tokensOf(readFileSync2(file, "utf8"));
   } catch {
     return 0;
   }
@@ -306,6 +321,141 @@ function checkLength(file, kind, add) {
     add(file, n, "error", `${n} lines > ${b.err} budget for a ${kind} file -> extract content`);
   else if (n > b.warn)
     add(file, n, "warn", `${n} lines > ${b.warn} (ideal) for a ${kind} file`);
+}
+function checkTokens(file, kind, add) {
+  const b = TOKEN_BUDGET[kind];
+  if (!b)
+    return;
+  const t = approxTokens(file);
+  const where = kind === "colocated" ? "move runbook and reference detail into context/ docs, keeping the rules here" : "split it by situation so each trigger loads only what it needs";
+  if (t > b.err)
+    add(file, 0, "error", `~${t} tokens > ${b.err} budget for a ${kind} file -> ${where}`);
+  else if (t > b.warn)
+    add(file, 0, "warn", `~${t} tokens > ${b.warn} (ideal) for a ${kind} file -> ${where}`);
+}
+function checkLongLines(file, add) {
+  const lines = readFileSync2(file, "utf8").split(`
+`);
+  let inFence = false;
+  let count = 0, longest = 0, first = 0;
+  for (let n = 0;n < lines.length; n++) {
+    const line = lines[n];
+    const tok = line.trimStart().slice(0, 3);
+    if (tok === "```" || tok === "~~~") {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || line.trimStart().startsWith("|"))
+      continue;
+    if (line.length <= LONG_LINE)
+      continue;
+    count++;
+    if (!first)
+      first = n + 1;
+    longest = Math.max(longest, line.length);
+  }
+  if (count) {
+    add(file, first, "warn", `${count} line(s) over ${LONG_LINE} chars (longest ${longest}) -> the line count understates this file's size; break up the paragraphs or move the detail out`);
+  }
+}
+function checkStacks(root, colocated, add) {
+  const tokens = new Map(colocated.map((f) => [dirname(relative(root, f)), approxTokens(f)]));
+  for (const file of colocated) {
+    let dir = dirname(relative(root, file));
+    const stack = [];
+    let total = 0;
+    while (dir !== "." && dir !== "") {
+      const t = tokens.get(dir);
+      if (t !== undefined) {
+        stack.push(dir);
+        total += t;
+      }
+      dir = dirname(dir);
+    }
+    if (stack.length > 1 && total > STACK_TOKEN_WARN) {
+      add(file, 0, "warn", `loads with ${plural(stack.length - 1, "ancestor CLAUDE.md", "ancestor CLAUDE.md files")} (${stack.slice(1).join(", ")}) for ~${total} tokens > ${STACK_TOKEN_WARN} -> slim the stack; move detail into context/ docs rather than another nested CLAUDE.md`);
+    }
+  }
+}
+var plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+function checkReadAhead(file, add) {
+  readFileSync2(file, "utf8").split(`
+`).forEach((line, i) => {
+    if (/^\s*-\s+/.test(line))
+      return;
+    const m = prose(line).match(READ_AHEAD);
+    if (m) {
+      add(file, i + 1, "warn", `directive tells the agent to read ahead ("${m[0]}") -> route only on a matching "Use when"; a doc read ahead loads on tasks that never needed it`);
+    }
+  });
+}
+function checkBroadTriggers(root, entries, add) {
+  for (const e of entries) {
+    if (!e.path.startsWith("context/") || isIndexPath(e.path))
+      continue;
+    const m = e.trigger.match(BROAD_TRIGGER);
+    if (!m)
+      continue;
+    const t = approxTokens(join2(root, e.path));
+    if (t > BROAD_DOC_TOKENS) {
+      add(join2(root, e.index), e.line, "warn", `broad trigger ("${m[0]}") routes a ~${t}-token doc onto nearly every task -> name the specific situations it serves, or move the always-needed lines into CLAUDE.md`);
+    }
+  }
+}
+function skillDescription(text) {
+  const fm = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm)
+    return "";
+  const lines = fm[1].split(/\r?\n/);
+  const i = lines.findIndex((l) => /^description:/.test(l));
+  if (i === -1)
+    return "";
+  const inline = lines[i].replace(/^description:\s*/, "");
+  if (inline && !/^[>|][-+]?$/.test(inline))
+    return inline.replace(/^(["'])([\s\S]*)\1$/, "$2");
+  const block = [];
+  for (const l of lines.slice(i + 1)) {
+    if (!/^\s/.test(l))
+      break;
+    block.push(l.trim());
+  }
+  return block.join(" ");
+}
+function checkSkills(root, isIgnored, add) {
+  let listing = 0, count = 0;
+  let firstDir = "";
+  for (const base of SKILL_DIRS) {
+    let dirs;
+    try {
+      dirs = readdirSync(join2(root, base), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const d of dirs) {
+      const rel = join2(base, d.name);
+      if (!d.isDirectory() || isIgnored(rel))
+        continue;
+      const file = join2(root, rel, "SKILL.md");
+      if (!existsSync2(file))
+        continue;
+      const text = readFileSync2(file, "utf8");
+      const desc = skillDescription(text);
+      count++;
+      listing += tokensOf(d.name + desc);
+      if (!firstDir)
+        firstDir = file;
+      if (desc.length > SKILL_DESCRIPTION_MAX) {
+        add(file, 0, "warn", `skill description is ${desc.length} chars > ${SKILL_DESCRIPTION_MAX} -> it is listed in every session; say what the skill does and when in a sentence or two, and move trigger catalogues into the body`);
+      }
+      const t = tokensOf(text);
+      if (t > SKILL_BODY_TOKEN_WARN) {
+        add(file, 0, "warn", `SKILL.md ~${t} tokens > ${SKILL_BODY_TOKEN_WARN} -> it loads whole when invoked and only its first ~${SKILL_BODY_TOKEN_WARN} tokens survive a compaction; put the rules first and move reference detail into references/ files`);
+      }
+    }
+  }
+  if (listing > SKILL_LISTING_TOKEN_WARN) {
+    add(firstDir, 0, "warn", `project skill listing ~${listing} tokens across ${count} skills > ${SKILL_LISTING_TOKEN_WARN} -> it loads every session; trim descriptions, merge overlapping skills, and hide skills people start by hand from the model where the agent supports it (e.g. Claude Code's disable-model-invocation)`);
+  }
 }
 function checkRootImport(file, hasContextDir, add) {
   if (!hasContextDir)
@@ -552,12 +702,20 @@ function checkContext(root, opts = {}) {
   const ignored = { files: 0, dirs: 0 };
   const contextDir = join2(root, "context");
   const hasContextDir = existsSync2(contextDir) && statSync(contextDir).isDirectory();
+  const colocated = [];
   for (const file of walk(root, root, [], isIgnored, ignored)) {
     const kind = classify(root, file);
     if (kind === "skip" || kind === "other")
       continue;
+    if (kind === "colocated")
+      colocated.push(file);
+    if (kind === "index")
+      checkReadAhead(file, add);
     checkText(file, add);
     checkLength(file, kind, add);
+    checkTokens(file, kind, add);
+    if (kind !== "topic")
+      checkLongLines(file, add);
     checkStaleProse(file, kind, add);
     checkNoFencedCode(file, kind, add);
     if (kind === "root") {
@@ -574,6 +732,7 @@ function checkContext(root, opts = {}) {
       entryCount = tree.entries.length;
       indexCount = tree.indexes.length;
       checkTriggerDrift(root, tree.entries, add);
+      checkBroadTriggers(root, tree.entries, add);
     }
     checkDuplicates(root, contextDir, add);
     const rootClaude = join2(root, "CLAUDE.md");
@@ -584,6 +743,8 @@ function checkContext(root, opts = {}) {
       }
     }
   }
+  checkStacks(root, colocated, add);
+  checkSkills(root, isIgnored, add);
   return { findings, entries: entryCount, indexes: indexCount, fixed, ignored };
 }
 function loadIndexTree(root) {
@@ -961,7 +1122,7 @@ function scaffoldTopic(root, rawName, rawTrigger, opts = {}) {
   const indexRel = `${dirRel}/index.md`;
   const indexFile = join5(root, indexRel);
   if (!existsSync5(indexFile)) {
-    throw new Error(area ? `no ${indexRel} under ${root} - create the area index and list it from a parent index first (scaffold adds INTO an existing index)` : `no context/index.md under ${root} - create it first with a "# Context index" title and an IMPORTANT directive line (scaffold adds entries INTO an existing index)`);
+    throw new Error(area ? `no ${indexRel} under ${root} - create the area index and list it from a parent index first (scaffold adds INTO an existing index)` : `no context/index.md under ${root} - create it first with a "# Context index" title and an IMPORTANT directive line - e.g. "IMPORTANT: Read an entry only when your task matches its Use when. Don't read ahead." (scaffold adds entries INTO an existing index)`);
   }
   const topicRel = `${dirRel}/${name}.md`;
   const topicFile = join5(root, topicRel);
@@ -1066,7 +1227,7 @@ function resolveRoot(target) {
   } catch {}
   return existsSync6(root) ? realpathSync(root) : root;
 }
-var plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+var plural2 = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 function runLs(root, json) {
   const entries = loadIndexTree(root);
   if (json) {
@@ -1082,7 +1243,7 @@ function runLs(root, json) {
   }
   const indexes = new Set(entries.map((e) => e.index)).size;
   console.log(`
-${plural(entries.length, "entry", "entries")}${indexes > 1 ? ` across ${indexes} indexes` : ""}`);
+${plural2(entries.length, "entry", "entries")}${indexes > 1 ? ` across ${indexes} indexes` : ""}`);
 }
 function runCheck(root, args, json) {
   const fix = has(args, "--fix");
@@ -1093,7 +1254,7 @@ function runCheck(root, args, json) {
     console.log(JSON.stringify(result, null, 2));
   } else {
     if (fix && result.fixed > 0)
-      console.log(`Applied ${plural(result.fixed, "autofix", "autofixes")}.`);
+      console.log(`Applied ${plural2(result.fixed, "autofix", "autofixes")}.`);
     if (result.ignored.files + result.ignored.dirs > 0) {
       console.log(`Ignored ${result.ignored.files} file(s) and ${result.ignored.dirs} path(s) via .contextignore / --ignore.`);
     }
@@ -1103,7 +1264,7 @@ function runCheck(root, args, json) {
       console.log(`  ${f.sev === "error" ? "ERROR" : "warn "} ${f.file}${f.line ? `:${f.line}` : ""}  ${f.msg}`);
     }
     console.log(`
-${plural(result.entries, "index entry", "index entries")}${result.indexes > 1 ? ` across ${result.indexes} indexes` : ""}; ${errs} error(s), ${warns} warning(s)`);
+${plural2(result.entries, "index entry", "index entries")}${result.indexes > 1 ? ` across ${result.indexes} indexes` : ""}; ${errs} error(s), ${warns} warning(s)`);
     if (errs > 0 && !fix) {
       console.log("Run with --fix to auto-correct mechanical violations, then resolve the rest by hand.");
     }

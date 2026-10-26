@@ -1,0 +1,7 @@
+schema_version: "1.1"
+name: setup-lean-index
+description: A long all-in-one CLAUDE.md, restructured from scratch.
+tags: [load-cost, setup]
+expected_outcome: A lean root, an index with no read-ahead directive, and topic docs behind specific triggers - no catch-all architecture doc.
+context:
+  scaffold_script: scaffold.sh
