@@ -6,6 +6,8 @@
 - Autofix the one mechanical violation with `--fix` (relocates a misplaced `@context/index.md` import to the last line). Em dashes and smart typography are house style, so punctuation is never rewritten.
 - Exit 0 = clean (warnings allowed); exit 1 = errors remain - keep fixing.
 - `--quiet` prints only errors (warnings are still counted) - use it when wiring the check into a commit hook or CI.
+- `--file <path>` reports findings for that doc only (repeatable); the whole corpus is still read, so cross-file checks stay correct. The doc-edit hook uses it.
+- `--symbols` adds the dead-identifier check (below). It reads every tracked source file, so it is an audit aid, not a commit gate.
 - Exclude foreign instruction files (legacy/demo/vendored `CLAUDE.md` the repo doesn't own): add literal paths (no globs) to a `.contextignore` at the repo root, one per line - e.g. `_legacy`, `expo/sports`. A bare name matches that dir/file at any depth; a path with a `/` anchors to the root and skips it plus anything beneath. Use `--ignore <a,b>` for one-offs. Ignore only files you don't author - never to silence real violations in your own corpus.
 
 Scope: root `CLAUDE.md`, the index tree (`context/index.md` plus every `context/<area>/index.md` it lists), every `context/**/*.md`, colocated `**/CLAUDE.md`, and project skills under `.claude/skills/*/SKILL.md` and `.agents/skills/*/SKILL.md`, and Claude Code workflows under `.claude/workflows/`.
@@ -43,11 +45,27 @@ Hygiene:
 - Dated state claim with no nearby anchor
 - `## Commands` after `## Architecture`
 
+Drift - prose that fell out of step with the repo or with a sibling doc:
+
+- A backticked repo path that names nothing: not at the root, not next to the doc, not as a package-relative abbreviation (`services/x.ts` for `services/api/src/services/x.ts`), and not gitignored. Sentences that say the thing is gone ("there is no", "removed", "returns nothing", "generated") are skipped, as are templates (`<id>`, `*`, `path/to/`) and paths whose first segment is nowhere in this repo
+- A rule sentence (10+ words) that another doc states word for word, ignoring markup - the copies drift apart. Sentences that point at a `context/` doc or a `CLAUDE.md` are skipped: a shared pointer is the fix, not the problem
+- With `--symbols`: a backticked camelCase/PascalCase identifier that no tracked source file contains (renamed or removed - or another system's API name, so judge each)
+
+## verify
+
+`context-index verify` lists every `verify:` anchor; `--run` executes them and reports four outcomes (`references/anchored-claims.md`):
+
+- Only read-only local pipelines run: each stage is `git grep`, `git ls-files`, `grep`, `ls`, `test`, `wc`, `sort`, `uniq`, `head`, `tail`, or `cut`, with no `;`, `&`, redirects, or substitutions. Anything else (`kubectl`, `curl`, `pnpm`, a script) is `unchecked` - run it by hand.
+- `conform` / `drift` need an expectation the runner can read after the command: "returns nothing", "finds nothing", "no hits" (empty output), or `(0)` (every count zero). A verify with no such words is `unchecked` after it runs - write the expectation in when the claim is a negative.
+- `broken`: the command itself failed - a file it names is gone. A missing gitignored file (an install or build artifact) is `unchecked`, not broken.
+- Exit 1 on any drift or broken.
+
 Tokens are estimated at 3 chars/token. Dense instruction markdown runs nearer 2.5, so real cost is usually a little higher than reported. For an exact figure, Claude Code's `/context` lists each loaded memory file.
 
 ## Does NOT catch - still your judgment
 
-- Whether a flagged overlap/drift is real
+- Whether a flagged overlap/drift is real, and which copy of a duplicated rule should stay
+- Paraphrased duplicates and stale claims that name no path or identifier (a wrong count, a changed behavior)
 - Classification (universal vs colocated vs cross-cutting)
 - Whether a skill is started by hand (hide it from the model) or by the model (keep its description)
 - Subtle trigger staleness; prose-vs-bullets quality

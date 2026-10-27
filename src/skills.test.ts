@@ -110,3 +110,44 @@ test("bundle: an unknown command exits 2 with usage", () => {
   expect(r.status).toBe(2);
   expect(r.stderr).toContain("usage: context-index");
 });
+
+const DOC_HOOK = join(SKILLS, "context-index", "hooks", "check-doc-edit.mjs");
+const runDocHook = (filePath: string) =>
+  spawnSync("node", [DOC_HOOK], {
+    encoding: "utf8",
+    input: JSON.stringify({ tool_name: "Edit", tool_input: { file_path: filePath } }),
+    env: { ...process.env, CLAUDE_PROJECT_DIR: root },
+  });
+
+test("doc-edit hook: an edited doc's drift comes back as context; clean docs and code stay silent", () => {
+  writeFileSync(join(root, "CLAUDE.md"), "# repo\n\n@context/index.md\n");
+  writeFileSync(join(root, "context", "index.md"), "# Index\n\n- `context/a.md` - Use when: touching a\n- `context/b.md` - Use when: touching b\n");
+  writeFileSync(join(root, "context", "a.md"), "# A\n\nThe config lives in `context/gone/config.md` now.\n");
+  writeFileSync(join(root, "context", "b.md"), "# B\n\nNothing to see.\n");
+  execFileSync("git", ["add", "-A"], { cwd: root });
+
+  const hit = runDocHook(join(root, "context", "a.md"));
+  expect(hit.status).toBe(0);
+  const out = JSON.parse(hit.stdout);
+  expect(out.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+  expect(out.hookSpecificOutput.additionalContext).toContain("context/gone/config.md");
+
+  expect(runDocHook(join(root, "context", "b.md")).stdout).toBe("");
+  expect(runDocHook(join(root, "src", "app.ts")).stdout).toBe("");
+});
+
+test("doc-edit hook: bad input exits 0 with no output", () => {
+  const r = spawnSync("node", [DOC_HOOK], { encoding: "utf8", input: "not json" });
+  expect(r.status).toBe(0);
+  expect(r.stdout).toBe("");
+});
+
+test("bundle: verify --run reports drift and exits 1", () => {
+  writeFileSync(join(root, "CLAUDE.md"), "# repo\n\n@context/index.md\n");
+  writeFileSync(join(root, "context", "index.md"), "# Index\n\n- `context/a.md` - Use when: touching a\n");
+  writeFileSync(join(root, "context", "a.md"), "# A\n\nNo legacy flag. verify: `grep -rn legacyFlag context/a.md` returns nothing\n");
+  const r = runBundle("verify", "--run");
+  expect(r.status).toBe(1);
+  expect(r.stdout).toContain("1 drift");
+  expect(runBundle("verify").stdout).toContain("Nothing was run");
+});

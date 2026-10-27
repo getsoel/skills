@@ -7,7 +7,13 @@ Rules for any instruction text: SKILL.md, README, CLAUDE.md, index entries, topi
 - Bullets over prose - terse, scannable, each line stands alone
 - Tables only for tabular data - use bullets for lists and rules
 - Headers (`#`) for section structure; horizontal rules (`---`) for major breaks only
-- Hard rules in the first 20 lines, echo in the last 10 - attention drops in the middle of long files
+- Hard rules in the first 20 lines - attention drops in the middle of long files. State each once; a closing recap is a second copy that drifts from the first
+
+## One home per fact
+
+- Each rule lives in exactly one file. Another file that needs it points to it (`context/x.md`, or "see `<dir>/CLAUDE.md`") instead of restating it - copies drift apart, and the validator flags word-for-word ones
+- A colocated `CLAUDE.md` and the topic doc behind it split the work: the rule in the CLAUDE.md (it loads whenever that directory is touched), the detail behind it in the doc. The doc opens with what it adds, not the rule again
+- Never hand-copy a count or a list the repo can produce (environments, tenants, packages, workflows, routes, CLI flags) - name the file or command that lists it (`source:`, or a `verify:` that prints it). A copied "five tenants" stays five after the sixth ships
 
 ## Length
 

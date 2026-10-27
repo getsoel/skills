@@ -18,6 +18,9 @@ Rules for picking what to keep from a session, where to put it, and what to drop
 - Anything a linter, formatter, or type checker enforces
 - Style preferences with no functional consequence
 - Content the codebase already makes obvious (imports, file layout, naming)
+- Incident retellings, rollout and fix logs, "previously it was" history - keep the rule the incident taught, drop the story (git keeps it)
+- A rule another doc already states - point to it (`references/formatting.md` -> "One home per fact")
+- Hand-copied counts or lists the repo can produce (environments, tenants, packages) - point at the file or command that lists them
 
 ## Prefer the fix over the note
 

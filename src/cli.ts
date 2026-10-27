@@ -5,11 +5,12 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { checkContext, loadIndexTree } from "./check";
+import { checkContext, corpusDocs, loadIndexTree } from "./check";
 import { findFootguns } from "./footguns";
 import { formatDigest, gatherDigest } from "./gather";
 import { addPending, backfillLedger, ledgerPath, pendingFixes, recordFriction, resolvePending } from "./ledger";
 import { scaffoldTopic } from "./scaffold";
+import { runVerifies, type VerifyOutcome } from "./verify";
 
 const USAGE = `usage: context-index <command> [options]
 
@@ -19,6 +20,10 @@ Commands:
                            [--fix] relocate a misplaced @context/index.md import
                            [--ignore <a,b>] skip foreign paths (also reads .contextignore)
                            [--quiet] print errors only (for commit hooks and CI)
+                           [--file <path>] report findings for this doc only (repeatable)
+                           [--symbols] also flag backticked identifiers no source file contains
+  verify                 List the corpus's verify: anchors; --run executes the read-only ones and
+                         reports conform / drift / broken / unchecked (exit 1 on drift or broken)
   scaffold <name> "<Use when trigger>"
                          New topic doc + wired index entry [--in <area>] [--no-check]
   footguns               Documented footguns to triage into fixes/checks [--limit N]
@@ -33,7 +38,7 @@ Options:
   --json                 Machine-readable output (ls, check, footguns, gather, ledger list)`;
 
 // Flags that consume the next argument. Everything else starting with -- is a boolean.
-const VALUE_FLAGS = new Set(["--target", "--ignore", "--in", "--limit", "--session"]);
+const VALUE_FLAGS = new Set(["--target", "--ignore", "--in", "--limit", "--session", "--file"]);
 
 interface Args {
   positionals: string[];
@@ -105,7 +110,12 @@ function runLs(root: string, json: boolean): void {
 
 function runCheck(root: string, args: Args, json: boolean): void {
   const fix = has(args, "--fix");
-  const result = checkContext(root, { fix, ignore: list(args, "--ignore") });
+  const result = checkContext(root, {
+    fix,
+    ignore: list(args, "--ignore"),
+    symbols: has(args, "--symbols"),
+    only: list(args, "--file"),
+  });
   const errs = result.findings.filter((f) => f.sev === "error").length;
   const warns = result.findings.length - errs;
   if (json) {
@@ -130,6 +140,26 @@ function runCheck(root: string, args: Args, json: boolean): void {
     }
   }
   if (errs > 0) process.exitCode = 1;
+}
+
+function runVerify(root: string, args: Args, json: boolean): void {
+  const results = runVerifies(root, corpusDocs(root, list(args, "--ignore")), { run: has(args, "--run") });
+  if (json) {
+    console.log(JSON.stringify(results, null, 2));
+  } else {
+    const counts: Record<VerifyOutcome, number> = { conform: 0, drift: 0, broken: 0, unchecked: 0 };
+    for (const r of results) counts[r.outcome]++;
+    for (const r of results.filter((r) => r.outcome === "drift" || r.outcome === "broken")) {
+      console.log(`  ${r.outcome.padEnd(6)} ${r.file}:${r.line}  ${r.command}
+           -> ${r.detail}`);
+    }
+    console.log(
+      `\n${plural(results.length, "verify anchor", "verify anchors")}: ${counts.conform} conform, ${counts.drift} drift, ${counts.broken} broken, ${counts.unchecked} unchecked`,
+    );
+    if (!has(args, "--run")) console.log("Nothing was run. Pass --run to execute the read-only ones.");
+    else if (counts.unchecked) console.log("Unchecked = not read-only, or the doc states no empty/zero expectation: run those by hand.");
+  }
+  if (results.some((r) => r.outcome === "drift" || r.outcome === "broken")) process.exitCode = 1;
 }
 
 function runScaffold(root: string, args: Args): void {
@@ -262,6 +292,8 @@ export function main(argv: string[]): void {
       return runScaffold(root, args);
     case "footguns":
       return runFootguns(root, args, json);
+    case "verify":
+      return runVerify(root, args, json);
     default:
       throw new Error(`unknown command "${cmd}"\n\n${USAGE}`);
   }

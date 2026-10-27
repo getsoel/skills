@@ -59,7 +59,7 @@ verify:    <per-tenant tag audit one-liner>
 Sort each state-bearing line and move it up the ladder:
 
 - Value transcribed from a spec that already owns it -> delete the value, add `source:`.
-- Snapshot with a verified-date -> reframe to `invariant:` + `verify:`; move the dated incident history to a commit message, changelog, or a sibling incident/topic doc.
+- Snapshot with a verified-date -> reframe to `invariant:` + `verify:`; drop the dated incident history - git and the commit message already keep it. Keep the rule it taught, not the story.
 - Footgun / gotcha -> first run the remediation ladder (`references/reflect-heuristics.md` -> "Prefer the fix over the note"): fix the root cause in code or add an `enforce:` check so it cannot recur. Only if neither is feasible, keep it - stated as an `invariant:`, not bare prose. A deleted footgun and an enforced invariant both beat a documented one.
 
 ## What NOT to anchor
