@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GatherResult } from "./gather";
-import { normalizeRemote, recordFriction, signatureOf } from "./ledger";
+import { addPending, normalizeRemote, pendingFixes, recordFriction, resolvePending, signatureOf } from "./ledger";
 
 function session(id: string, errors: string[]): GatherResult {
   return {
@@ -105,5 +105,36 @@ describe("normalizeRemote", () => {
 
   it("keeps an explicit port", () => {
     expect(normalizeRemote("ssh://git@git.example.com:2222/org/repo.git")).toBe("git.example.com:2222/org/repo");
+  });
+});
+
+describe("pending source fixes", () => {
+  const ledger = () => join(mkdtempSync(join(tmpdir(), "ledger-")), "context-index", "friction.jsonl");
+  const err = "Exit code 1\nModuleNotFoundError: No module named 'yaml'";
+
+  it("marks a recurring failure whose source fix has not landed", () => {
+    const path = ledger();
+    recordFriction(session("s1", [err]), path);
+    addPending(path, err, "install PyYAML (machine)");
+    const s = recordFriction(session("s2", [err]), path).get(0);
+    expect(s?.seenBefore).toBe(1);
+    expect(s?.pending).toBe("install PyYAML (machine)");
+  });
+
+  it("keys a pasted error and its signature the same way", () => {
+    const path = ledger();
+    addPending(path, signatureOf(err)!, "fix A");
+    expect(pendingFixes(path).get(signatureOf(err)!)).toBe("fix A");
+    expect(resolvePending(path, err)).toBe(true);
+  });
+
+  it("stops marking once resolved, and pending lines never count as sightings", () => {
+    const path = ledger();
+    addPending(path, err, "install PyYAML");
+    resolvePending(path, err);
+    const s = recordFriction(session("s1", [err]), path).get(0);
+    expect(s?.pending).toBeUndefined();
+    expect(s?.seenBefore).toBe(0);
+    expect(resolvePending(path, err)).toBe(false);
   });
 });

@@ -25,10 +25,11 @@ IMPORTANT: A gotcha you can write down is usually one you could DELETE. Before d
 
 1. **Fix it at the source** - remove the sharp edge so the gotcha cannot recur. Bad default returned -> pass the right argument. Wrong-but-silent call -> make it fail loudly up front. First ask WHO OWNS the sharp edge - it is often not this repo:
    - **This repo's code or tooling** (a script, the repo CLI, `package.json`, a missing command that wraps a manual sequence) -> draft the diff.
-   - **A tool the team owns in another repo** (an internal CLI that prints banners into `--json` stdout, a helper that hangs instead of failing on expired auth) -> a change request naming that repo, file, and change.
-   - **Agent or machine config** (an MCP server missing an output-dir flag or pinned version, a shell option such as zsh `nonomatch`, a missing system package) -> the exact config line or install command.
-   - **A third-party system's config** (a ticket workflow whose required field an automation rule could fill) -> the rule to add.
+   - **The user's own machine and agent config** (a shell option such as zsh `nonomatch`, a missing system package, an MCP server missing an output-dir flag or a pinned version, a broken local install) -> the user is right here and owns it: draft the exact change (config line, install command) and APPLY it with their per-item approval, backing up any file first. Then verify it took, from the agent's own shell - a fix that does not reach the agent's environment is not a fix.
+   - **Someone else's repo, tool, or system** (an internal CLI that prints banners into `--json` stdout, a helper that hangs on expired auth, a ticket workflow whose required field an automation rule could fill) -> a change request naming the owner, file or setting, and change. Record it as pending (§Pending source fixes).
    A fixed source needs no doc and no one to remember it.
+
+**The ladder is ranked by durability, not by what you can apply alone.** Never pick rung 2 because rung 1 needs someone's approval or another owner's action: present the source fix FIRST, as the recommendation. A guard over a cause with a source fix is at best INTERIM - write it only while the fix is pending, and make it state or check its own removal condition: a preflight that goes silent once the fix lands (`python3 -c 'import yaml'` succeeds -> the row never fires), or a comment naming the pending fix it stands in for. A permanent guard over a fixable cause is the wrong rung.
 2. **Harden the harness** - if you cannot delete it, make a machine catch it: lint rule, validator check, CI gate, type, test, preflight assertion, pre-commit hook, or an agent hook (§Writing agent hooks). An enforced invariant beats a documented one - it fires on its own instead of waiting to be read.
 3. **Document as an anchored invariant** - only when neither fix nor check is feasible. Write it per `references/anchored-claims.md` (`invariant:` + `verify:`), never as a bare gotcha. A doc works only if the right person reads the right line at the right moment.
 
@@ -38,7 +39,14 @@ IMPORTANT: A gotcha you can write down is usually one you could DELETE. Before d
 
 **Rung 2 outranks rung 3 only when the check is cheap AND quiet.** A guard earns its place if it is cheap to express and stays under a false-positive budget (Google's static-analysis rule: <=10% effective false positives at review, 0% at compile time; a noisy analyzer gets retired). A noisy `enforce:` is worse than none - it trains everyone to ignore it. Authoring is a real barrier too (in studies ~0% of non-experts could write an AST rule, ~25% with a DSL): when the only available guard is an expert-grade rule nobody will maintain, the honest rung is an anchored `verify:` note, not an aspirational check. Judge a guard by whether the defect class stops recurring (defects FIXED, not found) and keep it at the point of work (CI/validator), never a doc readers must consult.
 
-Most "add a gotcha" instincts are rung 3 grabbing the easiest tool - push up. A candidate that lands on rung 1 or 2 becomes a code/harness change, NOT a markdown edit: inside this repo, draft the actual diff for the user to approve with the rest of the batch; outside it, a change request naming the owner, file, and change.
+Most "add a gotcha" instincts are rung 3 grabbing the easiest tool - push up. A candidate that lands on rung 1 or 2 becomes a code/harness/config change, NOT a markdown edit: in this repo or on the user's own machine, draft the actual change for the user to approve with the rest of the batch; for anyone else's, a change request naming the owner, file, and change.
+
+## Pending source fixes
+
+A change request nobody tracks is a fix that never lands, and the guard standing in for it becomes permanent by default. Record each one against the failure signature it fixes: `context-index ledger pending "<signature>" "<fix and owner>"` (take the signature from `context-index gather --json` -> `friction[].signature`). From then on `gather` marks that failure's rows `[source fix pending: …]`. When a later pass sees a pending row:
+
+- **Still recurring** -> the fix has not landed: re-raise it with the owner. Do not add another guard or doc line for it.
+- **Landed** (verified) -> `context-index ledger resolve "<signature>"`, and remove any interim guard row that stood in for it.
 
 ## Writing agent hooks
 

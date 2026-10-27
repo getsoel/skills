@@ -393,11 +393,14 @@ const LABEL: Record<DigestKind, string> = {
  * the friction ledger annotated an error row, the row says how many earlier
  * sessions hit the same failure: that count is what reflect's repetition gate reads.
  */
-export function formatDigest(result: GatherResult, seen?: Map<number, { seenBefore: number }>): string {
+export function formatDigest(result: GatherResult, seen?: Map<number, { seenBefore: number; pending?: string }>): string {
   const out: string[] = [];
   for (const [i, row] of result.rows.entries()) {
     const s = seen?.get(i);
-    const tag = s && s.seenBefore > 0 ? `[seen in ${s.seenBefore} earlier session${s.seenBefore === 1 ? "" : "s"}] ` : "";
+    const notes: string[] = [];
+    if (s && s.seenBefore > 0) notes.push(`seen in ${s.seenBefore} earlier session${s.seenBefore === 1 ? "" : "s"}`);
+    if (s?.pending !== undefined) notes.push(`source fix pending: ${s.pending}`);
+    const tag = notes.length ? `[${notes.join("; ")}] ` : "";
     out.push(`${LABEL[row.kind]}  ${tag}${row.text}`);
     out.push("");
   }

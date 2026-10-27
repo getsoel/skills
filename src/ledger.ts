@@ -132,10 +132,68 @@ function readLedger(path: string): LedgerEntry[] {
   return out;
 }
 
+/**
+ * Source fixes asked of someone else (a change request) or not yet applied,
+ * keyed by the signature they would retire. Without this a change request is
+ * fire-and-forget, and the guard standing in for it quietly becomes permanent:
+ * a pending fix lets the next reflect pass see "still recurring, fix not landed"
+ * instead of reaching for another guard. Later lines win, so `resolved` clears.
+ */
+interface PendingLine {
+  pending?: string;
+  resolved?: string;
+  fix?: string;
+  ts?: string;
+}
+
+/** Normalize a signature or raw error text the way gather keys it. */
+export function signatureKey(text: string): string {
+  return signatureOf(text) ?? text.trim().toLowerCase();
+}
+
+export function pendingFixes(path: string): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!existsSync(path)) return out;
+  for (const raw of readFileSync(path, "utf8").split("\n")) {
+    if (!raw.trim()) continue;
+    let line: PendingLine;
+    try {
+      line = JSON.parse(raw) as PendingLine;
+    } catch {
+      continue;
+    }
+    if (typeof line.pending === "string") out.set(line.pending, line.fix ?? "");
+    else if (typeof line.resolved === "string") out.delete(line.resolved);
+  }
+  return out;
+}
+
+function appendLine(path: string, line: PendingLine): void {
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, JSON.stringify(line) + "\n");
+}
+
+/** Record that `fix` (owner + change) would retire `signature`. Returns the normalized key. */
+export function addPending(path: string, signature: string, fix: string): string {
+  const key = signatureKey(signature);
+  appendLine(path, { pending: key, fix, ts: new Date().toISOString() });
+  return key;
+}
+
+/** Mark the pending fix for `signature` as landed. False when nothing was pending. */
+export function resolvePending(path: string, signature: string): boolean {
+  const key = signatureKey(signature);
+  if (!pendingFixes(path).has(key)) return false;
+  appendLine(path, { resolved: key, ts: new Date().toISOString() });
+  return true;
+}
+
 export interface Sighting {
   signature: string;
   /** Distinct OTHER sessions that produced this signature before. */
   seenBefore: number;
+  /** A recorded source fix for this signature that has not landed yet. */
+  pending?: string;
 }
 
 /**
@@ -152,6 +210,7 @@ export function recordFriction(result: GatherResult, path: string): Map<number, 
   const session = result.sessionId;
   if (!session) return sightings;
 
+  const pending = pendingFixes(path);
   const prior = new Map<string, Set<string>>();
   for (const e of readLedger(path)) {
     if (!prior.has(e.sig)) prior.set(e.sig, new Set());
@@ -164,7 +223,11 @@ export function recordFriction(result: GatherResult, path: string): Map<number, 
     const sig = signatureOf(row.text);
     if (!sig) return;
     const sessions = prior.get(sig) ?? new Set<string>();
-    sightings.set(i, { signature: sig, seenBefore: [...sessions].filter((s) => s !== session).length });
+    sightings.set(i, {
+      signature: sig,
+      seenBefore: [...sessions].filter((s) => s !== session).length,
+      ...(pending.has(sig) ? { pending: pending.get(sig) } : {}),
+    });
     if (!sessions.has(session)) {
       sessions.add(session);
       prior.set(sig, sessions);

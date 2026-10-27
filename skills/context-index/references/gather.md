@@ -59,6 +59,7 @@ reflect's repetition gate needs to know whether a failure happened before, and o
 - **Idempotent.** A signature is recorded once per session, so re-gathering never inflates a count.
 - **Signatures only.** It stores the normalized one-line signature, never the digest or the transcript.
 - `--backfill` seeds it from every past session of the repo - any clone or worktree, matched by the directory each session ran in - so the gate works from the first reflect. `--no-ledger` skips it.
+- **Pending source fixes.** `context-index ledger pending "<signature>" "<fix and owner>"` records a source fix that has not landed - a change request to another owner, or a machine fix not yet applied. Rows with that signature then read `[source fix pending: …]`, so a later pass re-raises the fix instead of adding a guard. `ledger resolve` clears it once it lands; `ledger list` shows what is outstanding.
 
 User corrections are not signatured: their wording varies too much for a deterministic key. reflect checks those against existing docs and handoffs.
 

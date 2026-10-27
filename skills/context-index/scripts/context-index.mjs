@@ -1167,7 +1167,12 @@ function formatDigest(result, seen) {
   const out = [];
   for (const [i, row] of result.rows.entries()) {
     const s = seen?.get(i);
-    const tag = s && s.seenBefore > 0 ? `[seen in ${s.seenBefore} earlier session${s.seenBefore === 1 ? "" : "s"}] ` : "";
+    const notes = [];
+    if (s && s.seenBefore > 0)
+      notes.push(`seen in ${s.seenBefore} earlier session${s.seenBefore === 1 ? "" : "s"}`);
+    if (s?.pending !== undefined)
+      notes.push(`source fix pending: ${s.pending}`);
+    const tag = notes.length ? `[${notes.join("; ")}] ` : "";
     out.push(`${LABEL[row.kind]}  ${tag}${row.text}`);
     out.push("");
   }
@@ -1232,11 +1237,53 @@ function readLedger(path) {
   }
   return out;
 }
+function signatureKey(text) {
+  return signatureOf(text) ?? text.trim().toLowerCase();
+}
+function pendingFixes(path) {
+  const out = new Map;
+  if (!existsSync5(path))
+    return out;
+  for (const raw of readFileSync5(path, "utf8").split(`
+`)) {
+    if (!raw.trim())
+      continue;
+    let line;
+    try {
+      line = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (typeof line.pending === "string")
+      out.set(line.pending, line.fix ?? "");
+    else if (typeof line.resolved === "string")
+      out.delete(line.resolved);
+  }
+  return out;
+}
+function appendLine(path, line) {
+  mkdirSync(dirname2(path), { recursive: true });
+  appendFileSync(path, JSON.stringify(line) + `
+`);
+}
+function addPending(path, signature, fix) {
+  const key = signatureKey(signature);
+  appendLine(path, { pending: key, fix, ts: new Date().toISOString() });
+  return key;
+}
+function resolvePending(path, signature) {
+  const key = signatureKey(signature);
+  if (!pendingFixes(path).has(key))
+    return false;
+  appendLine(path, { resolved: key, ts: new Date().toISOString() });
+  return true;
+}
 function recordFriction(result, path) {
   const sightings = new Map;
   const session = result.sessionId;
   if (!session)
     return sightings;
+  const pending = pendingFixes(path);
   const prior = new Map;
   for (const e of readLedger(path)) {
     if (!prior.has(e.sig))
@@ -1251,7 +1298,11 @@ function recordFriction(result, path) {
     if (!sig)
       return;
     const sessions = prior.get(sig) ?? new Set;
-    sightings.set(i, { signature: sig, seenBefore: [...sessions].filter((s) => s !== session).length });
+    sightings.set(i, {
+      signature: sig,
+      seenBefore: [...sessions].filter((s) => s !== session).length,
+      ...pending.has(sig) ? { pending: pending.get(sig) } : {}
+    });
     if (!sessions.has(session)) {
       sessions.add(session);
       prior.set(sig, sessions);
@@ -1404,10 +1455,13 @@ Commands:
   footguns               Documented footguns to triage into fixes/checks [--limit N]
   gather                 Digest a Claude Code session transcript [--session <id>] [--limit N]
                          Records failure signatures in the repo's friction ledger [--no-ledger]; --backfill seeds it from past sessions
+  ledger pending <signature> <fix>   Record a source fix not yet landed (gather then marks the failure)
+  ledger resolve <signature>         Mark it landed
+  ledger list                        Pending source fixes
 
 Options:
   --target <path>        Repo to operate on (default: the git toplevel of the cwd)
-  --json                 Machine-readable output (ls, check, footguns, gather)`;
+  --json                 Machine-readable output (ls, check, footguns, gather, ledger list)`;
 var VALUE_FLAGS = new Set(["--target", "--ignore", "--in", "--limit", "--session"]);
 function parseArgs(argv) {
   const positionals = [];
@@ -1581,6 +1635,35 @@ function runGather(args, json) {
 `);
   console.log(formatDigest(result, seen));
 }
+function runLedger(args, json) {
+  const [, verb, signature, fix] = args.positionals;
+  const ledger = ledgerPath();
+  if (!ledger)
+    throw new Error("ledger needs a git repo (the ledger is keyed on it)");
+  if (verb === "pending") {
+    if (!signature || !fix)
+      throw new Error('usage: context-index ledger pending "<signature>" "<fix and owner>"');
+    console.log(`pending: ${addPending(ledger, signature, fix)}`);
+  } else if (verb === "resolve") {
+    if (!signature)
+      throw new Error('usage: context-index ledger resolve "<signature>"');
+    if (!resolvePending(ledger, signature))
+      throw new Error(`no pending fix for "${signature}"`);
+    console.log("resolved");
+  } else if (verb === "list" || verb === undefined) {
+    const pending = [...pendingFixes(ledger)].map(([sig, fix]) => ({ signature: sig, fix }));
+    if (json)
+      console.log(JSON.stringify(pending, null, 2));
+    else if (!pending.length)
+      console.log("No pending source fixes.");
+    else
+      for (const p of pending)
+        console.log(`${p.signature}
+    -> ${p.fix}`);
+  } else {
+    throw new Error(`unknown ledger verb "${verb}" (pending | resolve | list)`);
+  }
+}
 function main(argv) {
   const args = parseArgs(argv);
   const cmd = args.positionals[0];
@@ -1591,6 +1674,8 @@ function main(argv) {
   }
   if (cmd === "gather")
     return runGather(args, json);
+  if (cmd === "ledger")
+    return runLedger(args, json);
   const root = resolveRoot(flag(args, "--target"));
   switch (cmd) {
     case "ls":

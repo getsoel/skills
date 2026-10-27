@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { checkContext, loadIndexTree } from "./check";
 import { findFootguns } from "./footguns";
 import { formatDigest, gatherDigest } from "./gather";
-import { backfillLedger, ledgerPath, recordFriction } from "./ledger";
+import { addPending, backfillLedger, ledgerPath, pendingFixes, recordFriction, resolvePending } from "./ledger";
 import { scaffoldTopic } from "./scaffold";
 
 const USAGE = `usage: context-index <command> [options]
@@ -24,10 +24,13 @@ Commands:
   footguns               Documented footguns to triage into fixes/checks [--limit N]
   gather                 Digest a Claude Code session transcript [--session <id>] [--limit N]
                          Records failure signatures in the repo's friction ledger [--no-ledger]; --backfill seeds it from past sessions
+  ledger pending <signature> <fix>   Record a source fix not yet landed (gather then marks the failure)
+  ledger resolve <signature>         Mark it landed
+  ledger list                        Pending source fixes
 
 Options:
   --target <path>        Repo to operate on (default: the git toplevel of the cwd)
-  --json                 Machine-readable output (ls, check, footguns, gather)`;
+  --json                 Machine-readable output (ls, check, footguns, gather, ledger list)`;
 
 // Flags that consume the next argument. Everything else starting with -- is a boolean.
 const VALUE_FLAGS = new Set(["--target", "--ignore", "--in", "--limit", "--session"]);
@@ -218,6 +221,27 @@ function runGather(args: Args, json: boolean): void {
   console.log(formatDigest(result, seen));
 }
 
+function runLedger(args: Args, json: boolean): void {
+  const [, verb, signature, fix] = args.positionals;
+  const ledger = ledgerPath();
+  if (!ledger) throw new Error("ledger needs a git repo (the ledger is keyed on it)");
+  if (verb === "pending") {
+    if (!signature || !fix) throw new Error('usage: context-index ledger pending "<signature>" "<fix and owner>"');
+    console.log(`pending: ${addPending(ledger, signature, fix)}`);
+  } else if (verb === "resolve") {
+    if (!signature) throw new Error('usage: context-index ledger resolve "<signature>"');
+    if (!resolvePending(ledger, signature)) throw new Error(`no pending fix for "${signature}"`);
+    console.log("resolved");
+  } else if (verb === "list" || verb === undefined) {
+    const pending = [...pendingFixes(ledger)].map(([sig, fix]) => ({ signature: sig, fix }));
+    if (json) console.log(JSON.stringify(pending, null, 2));
+    else if (!pending.length) console.log("No pending source fixes.");
+    else for (const p of pending) console.log(`${p.signature}\n    -> ${p.fix}`);
+  } else {
+    throw new Error(`unknown ledger verb "${verb}" (pending | resolve | list)`);
+  }
+}
+
 export function main(argv: string[]): void {
   const args = parseArgs(argv);
   const cmd = args.positionals[0];
@@ -227,6 +251,7 @@ export function main(argv: string[]): void {
     return;
   }
   if (cmd === "gather") return runGather(args, json);
+  if (cmd === "ledger") return runLedger(args, json);
   const root = resolveRoot(flag(args, "--target"));
   switch (cmd) {
     case "ls":
