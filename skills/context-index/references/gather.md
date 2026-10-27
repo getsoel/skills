@@ -34,7 +34,7 @@ Only top-level `<session-id>.jsonl` files are considered. Subagent transcripts n
 
 `promptSource:"typed"` is the load-bearing field: every other `user` line is a tool result, an injected reminder, or a system-authored turn, and none of those are things the user said. The human's turns are the highest-signal rows in the file - they are where "actually, do it this way" lives - which is why they alone survive whole.
 
-`ERR` is NARROWER than "the session's failures". `is_error:true` marks the TOOL CALL failing - a rejected or errored tool use. A command that merely exits non-zero inside `Bash` (a failing test, a build error, a `fatal:` from git) returns a SUCCESSFUL `tool_result`, so it is dropped as bulk and never becomes an `ERR` row. Observed: a session with several failed commands and hook blocks produced exactly one `ERR`, and it was a tool rejection. Do not read an absence of `ERR` rows as a session that went smoothly - widening this would mean keeping successful tool output, which is the bulk this digest exists to drop.
+`ERR` is a failed TOOL CALL: a rejection, a hook block, an MCP error, and - in current Claude Code - a `Bash` command that exited non-zero (`Exit code 1 …`). Across 681 real sessions, 1,149 of 1,546 `ERR` rows were `Bash` exits. Not every one is friction: a test failing while you iterate is the intended signal. reflect sorts them (`references/reflect-heuristics.md` -> "Failed tool calls are friction too").
 
 ## Drop
 
@@ -49,8 +49,22 @@ Consecutive identical rows collapse. Claude Code can record the same turn twice 
 
 Adjacency is what makes this safe. A re-recorded turn is immediately consecutive; two genuine "yes" answers always have an assistant row between them, so they are never adjacent and never collapsed.
 
+## Friction ledger
+
+reflect's repetition gate needs to know whether a failure happened before, and one session cannot tell it. So `gather` normalizes each `ERR` row to a signature - paths, numbers, ids, tokens and quoted values replaced, stack framing skipped - and records which sessions produced it in a per-repo ledger.
+
+- **One ledger per repo, not per checkout.** It is keyed on the normalized `origin` remote and kept at `~/.claude/context-index/ledgers/<host-org-repo>.jsonl`, so side-by-side clones and worktrees share it - on one team's repo, a per-clone ledger saw 199 of 689 sessions. A repo with no `origin` falls back to `<git common dir>/context-index/friction.jsonl`. Never inside the work tree, so never committed.
+- **Repo problems only.** A user rejecting a tool call is a decision, and the agent harness's own preconditions (edit before read, a stale `old_string`) are not repo footguns - neither is recorded.
+- **Annotates the digest.** An `ERR` row whose signature appeared in earlier sessions reads `[seen in N earlier sessions]`. `--json` adds a `friction` array with each row's signature and count.
+- **Idempotent.** A signature is recorded once per session, so re-gathering never inflates a count.
+- **Signatures only.** It stores the normalized one-line signature, never the digest or the transcript.
+- `--backfill` seeds it from every past session of the repo - any clone or worktree, matched by the directory each session ran in - so the gate works from the first reflect. `--no-ledger` skips it.
+- **Pending source fixes.** `context-index ledger pending "<signature>" "<fix and owner>"` records a source fix that has not landed - a change request to another owner, or a machine fix not yet applied. Rows with that signature then read `[source fix pending: …]`, so a later pass re-raises the fix instead of adding a guard. `ledger resolve` clears it once it lands; `ledger list` shows what is outstanding.
+
+User corrections are not signatured: their wording varies too much for a deterministic key. reflect checks those against existing docs and handoffs.
+
 ## What it does not do
 
-The digest is streamed and never stored - nothing in this path writes anywhere.
+The digest is streamed and never stored. The only write is the ledger's signature lines.
 
 It reads Claude Code transcripts (`~/.claude/projects/`) only. In any other agent it reports no transcript, and reflect falls back to the live context and says the pass was degraded.

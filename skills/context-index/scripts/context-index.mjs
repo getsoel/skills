@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { execFileSync } from "node:child_process";
-import { existsSync as existsSync6, realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { execFileSync as execFileSync2 } from "node:child_process";
+import { existsSync as existsSync7, realpathSync } from "node:fs";
+import { resolve as resolve2 } from "node:path";
 
 // src/check.ts
 import { existsSync as existsSync2, readFileSync as readFileSync2, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -1116,6 +1116,9 @@ function resolveTranscript(opts = {}) {
 }
 function gatherDigest(opts = {}) {
   const { transcript, sessionId, missing } = resolveTranscript(opts);
+  return digestTranscript(transcript, sessionId, missing, opts.limit);
+}
+function digestTranscript(transcript, sessionId, missing = false, limit) {
   const empty = {
     lines: 0,
     extracted: 0,
@@ -1140,7 +1143,7 @@ function gatherDigest(opts = {}) {
       extracted.push(row);
   }
   const { rows: deduped, removed } = dedupe(extracted);
-  const limited = opts.limit && opts.limit > 0 ? deduped.slice(-opts.limit) : deduped;
+  const limited = limit && limit > 0 ? deduped.slice(-limit) : deduped;
   return {
     transcript,
     sessionId,
@@ -1160,19 +1163,216 @@ var LABEL = {
   assistant: "ASST",
   error: "ERR "
 };
-function formatDigest(result) {
+function formatDigest(result, seen) {
   const out = [];
-  for (const row of result.rows) {
-    out.push(`${LABEL[row.kind]}  ${row.text}`);
+  for (const [i, row] of result.rows.entries()) {
+    const s = seen?.get(i);
+    const notes = [];
+    if (s && s.seenBefore > 0)
+      notes.push(`seen in ${s.seenBefore} earlier session${s.seenBefore === 1 ? "" : "s"}`);
+    if (s?.pending !== undefined)
+      notes.push(`source fix pending: ${s.pending}`);
+    const tag = notes.length ? `[${notes.join("; ")}] ` : "";
+    out.push(`${LABEL[row.kind]}  ${tag}${row.text}`);
     out.push("");
   }
   return out.join(`
 `);
 }
 
+// src/ledger.ts
+import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync as existsSync5, mkdirSync, readFileSync as readFileSync5, readdirSync as readdirSync4 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname2, isAbsolute, join as join5, resolve } from "node:path";
+var ERROR_LINE = /\b(error|fatal|not found|no such|denied|blocked|timed out|cannot|can't|failed|traceback|refused|unauthori[sz]ed|forbidden|no matches|not allowed|invalid)\b/i;
+var FRAME_LINE = /^(#+ |traceback \(most recent call last\)|at |node:internal|file "|\^|throw )/i;
+var HARNESS_NOISE = /doesn't want to proceed with this tool use|tool use was rejected|<tool_use_error>(string to replace not found|file has not been read yet|file has been modified since read|found \d+ matches of the string)/i;
+var MAX_SIGNATURE_CHARS = 120;
+function signatureOf(error) {
+  if (HARNESS_NOISE.test(error))
+    return null;
+  const lines = error.split(`
+`).map((l) => l.trim()).filter((l) => l && !/^exit code \d+$/i.test(l) && !FRAME_LINE.test(l));
+  if (!lines.length)
+    return null;
+  const pick = lines.find((l) => ERROR_LINE.test(l)) ?? lines[0];
+  const sig = pick.replace(/\u001b\[[0-9;]*m/g, "").replace(/https?:\/\/\S+/g, "<url>").replace(/(?<![\w.@~+-])(?:~|\.{1,2})?\/[\w.@~+-]+(?:\/[\w.@~+-]*)+/g, "<path>").replace(/\b[\w.@~+-]+(?:\/[\w.@~+-]+)+\/?/g, "<path>").replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "<id>").replace(/\b[A-Za-z0-9+/_-]{24,}={0,2}/g, "<id>").replace(/(["`]).*?\1/g, "<q>").replace(/(^|[\s(=:])'[^']*'/g, "$1<q>").replace(/\d+/g, "N").replace(/\s+/g, " ").toLowerCase().trim();
+  return sig ? sig.slice(0, MAX_SIGNATURE_CHARS) : null;
+}
+function git(cwd, args) {
+  try {
+    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+function normalizeRemote(url) {
+  return url.trim().replace(/^[a-z+]+:\/\//i, "").replace(/^[^@/]+@/, "").replace(/^([^/:]+):(?!\d+\/)/, "$1/").replace(/\.git\/?$/, "").replace(/\/+$/, "").toLowerCase();
+}
+function ledgerPath(cwd = process.cwd()) {
+  const origin = git(cwd, ["remote", "get-url", "origin"]);
+  if (origin) {
+    const key = normalizeRemote(origin).replace(/[^a-z0-9.]+/g, "-");
+    return join5(homedir2(), ".claude", "context-index", "ledgers", `${key}.jsonl`);
+  }
+  const common = git(cwd, ["rev-parse", "--git-common-dir"]);
+  if (!common)
+    return null;
+  return join5(isAbsolute(common) ? common : resolve(cwd, common), "context-index", "friction.jsonl");
+}
+function readLedger(path) {
+  if (!existsSync5(path))
+    return [];
+  const out = [];
+  for (const raw of readFileSync5(path, "utf8").split(`
+`)) {
+    if (!raw.trim())
+      continue;
+    try {
+      const e = JSON.parse(raw);
+      if (typeof e.sig === "string" && typeof e.session === "string")
+        out.push(e);
+    } catch {}
+  }
+  return out;
+}
+function signatureKey(text) {
+  return signatureOf(text) ?? text.trim().toLowerCase();
+}
+function pendingFixes(path) {
+  const out = new Map;
+  if (!existsSync5(path))
+    return out;
+  for (const raw of readFileSync5(path, "utf8").split(`
+`)) {
+    if (!raw.trim())
+      continue;
+    let line;
+    try {
+      line = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (typeof line.pending === "string")
+      out.set(line.pending, line.fix ?? "");
+    else if (typeof line.resolved === "string")
+      out.delete(line.resolved);
+  }
+  return out;
+}
+function appendLine(path, line) {
+  mkdirSync(dirname2(path), { recursive: true });
+  appendFileSync(path, JSON.stringify(line) + `
+`);
+}
+function addPending(path, signature, fix) {
+  const key = signatureKey(signature);
+  appendLine(path, { pending: key, fix, ts: new Date().toISOString() });
+  return key;
+}
+function resolvePending(path, signature) {
+  const key = signatureKey(signature);
+  if (!pendingFixes(path).has(key))
+    return false;
+  appendLine(path, { resolved: key, ts: new Date().toISOString() });
+  return true;
+}
+function recordFriction(result, path) {
+  const sightings = new Map;
+  const session = result.sessionId;
+  if (!session)
+    return sightings;
+  const pending = pendingFixes(path);
+  const prior = new Map;
+  for (const e of readLedger(path)) {
+    if (!prior.has(e.sig))
+      prior.set(e.sig, new Set);
+    prior.get(e.sig).add(e.session);
+  }
+  const fresh = [];
+  result.rows.forEach((row, i) => {
+    if (row.kind !== "error")
+      return;
+    const sig = signatureOf(row.text);
+    if (!sig)
+      return;
+    const sessions = prior.get(sig) ?? new Set;
+    sightings.set(i, {
+      signature: sig,
+      seenBefore: [...sessions].filter((s) => s !== session).length,
+      ...pending.has(sig) ? { pending: pending.get(sig) } : {}
+    });
+    if (!sessions.has(session)) {
+      sessions.add(session);
+      prior.set(sig, sessions);
+      fresh.push({ sig, session, ts: row.ts });
+    }
+  });
+  if (fresh.length) {
+    try {
+      mkdirSync(dirname2(path), { recursive: true });
+      appendFileSync(path, fresh.map((e) => JSON.stringify(e)).join(`
+`) + `
+`);
+    } catch {}
+  }
+  return sightings;
+}
+function transcriptCwd(path) {
+  let head;
+  try {
+    head = readFileSync5(path, "utf8").slice(0, 64000);
+  } catch {
+    return null;
+  }
+  for (const raw of head.split(`
+`)) {
+    try {
+      const line = JSON.parse(raw);
+      if (typeof line.cwd === "string")
+        return line.cwd;
+    } catch {}
+  }
+  return null;
+}
+function backfillLedger(path) {
+  let dirs;
+  try {
+    dirs = readdirSync4(claudeProjectsRoot());
+  } catch {
+    return 0;
+  }
+  const owner = new Map;
+  let n = 0;
+  for (const dir of dirs.sort()) {
+    let entries;
+    try {
+      entries = readdirSync4(join5(claudeProjectsRoot(), dir));
+    } catch {
+      continue;
+    }
+    for (const entry of entries.sort()) {
+      if (!entry.endsWith(".jsonl"))
+        continue;
+      const transcript = join5(claudeProjectsRoot(), dir, entry);
+      const cwd = transcriptCwd(transcript);
+      if (!cwd)
+        continue;
+      if (!owner.has(cwd))
+        owner.set(cwd, existsSync5(cwd) ? ledgerPath(cwd) : null);
+      if (owner.get(cwd) !== path)
+        continue;
+      recordFriction(digestTranscript(transcript, entry.slice(0, -".jsonl".length)), path);
+      n++;
+    }
+  }
+  return n;
+}
+
 // src/scaffold.ts
-import { existsSync as existsSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join5 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join6 } from "node:path";
 function normalizeTopicName(raw) {
   return raw.replace(/\.md$/i, "").replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[_\s]+/g, "-").toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
@@ -1190,16 +1390,16 @@ function scaffoldTopic(root, rawName, rawTrigger, opts = {}) {
   const area = (opts.area ?? "").replace(/^context\//, "").split("/").map(normalizeTopicName).filter(Boolean).join("/");
   const dirRel = area ? `context/${area}` : "context";
   const indexRel = `${dirRel}/index.md`;
-  const indexFile = join5(root, indexRel);
-  if (!existsSync5(indexFile)) {
+  const indexFile = join6(root, indexRel);
+  if (!existsSync6(indexFile)) {
     throw new Error(area ? `no ${indexRel} under ${root} - create the area index and list it from a parent index first (scaffold adds INTO an existing index)` : `no context/index.md under ${root} - create it first with a "# Context index" title and an IMPORTANT directive line - e.g. "IMPORTANT: Read an entry only when your task matches its Use when. Don't read ahead." (scaffold adds entries INTO an existing index)`);
   }
   const topicRel = `${dirRel}/${name}.md`;
-  const topicFile = join5(root, topicRel);
-  if (existsSync5(topicFile)) {
+  const topicFile = join6(root, topicRel);
+  if (existsSync6(topicFile)) {
     throw new Error(`${topicRel} already exists - edit it directly or pick another name`);
   }
-  const indexLines = readFileSync5(indexFile, "utf8").split(`
+  const indexLines = readFileSync6(indexFile, "utf8").split(`
 `);
   for (let i = 0;i < indexLines.length; i++) {
     if (entryPath(indexLines[i]) === topicRel) {
@@ -1254,10 +1454,14 @@ Commands:
                          New topic doc + wired index entry [--in <area>] [--no-check]
   footguns               Documented footguns to triage into fixes/checks [--limit N]
   gather                 Digest a Claude Code session transcript [--session <id>] [--limit N]
+                         Records failure signatures in the repo's friction ledger [--no-ledger]; --backfill seeds it from past sessions
+  ledger pending <signature> <fix>   Record a source fix not yet landed (gather then marks the failure)
+  ledger resolve <signature>         Mark it landed
+  ledger list                        Pending source fixes
 
 Options:
   --target <path>        Repo to operate on (default: the git toplevel of the cwd)
-  --json                 Machine-readable output (ls, check, footguns, gather)`;
+  --json                 Machine-readable output (ls, check, footguns, gather, ledger list)`;
 var VALUE_FLAGS = new Set(["--target", "--ignore", "--in", "--limit", "--session"]);
 function parseArgs(argv) {
   const positionals = [];
@@ -1286,16 +1490,16 @@ var flag = (args, name) => args.flags.get(name)?.at(-1);
 var has = (args, name) => args.flags.has(name);
 var list = (args, name) => (args.flags.get(name) ?? []).flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean);
 function resolveRoot(target) {
-  const start = resolve(target ?? process.cwd());
+  const start = resolve2(target ?? process.cwd());
   let root = start;
   try {
-    root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    root = execFileSync2("git", ["rev-parse", "--show-toplevel"], {
       cwd: start,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim() || start;
   } catch {}
-  return existsSync6(root) ? realpathSync(root) : root;
+  return existsSync7(root) ? realpathSync(root) : root;
 }
 var plural2 = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 function runLs(root, json) {
@@ -1404,9 +1608,17 @@ Top files:`);
   }
 }
 function runGather(args, json) {
+  const ledger = has(args, "--no-ledger") ? null : ledgerPath();
+  if (has(args, "--backfill")) {
+    if (!ledger)
+      throw new Error("--backfill needs a git repo (the ledger is keyed on it)");
+    console.log(`Backfilled the friction ledger from ${backfillLedger(ledger)} session(s): ${ledger}`);
+    return;
+  }
   const result = gatherDigest({ sessionId: flag(args, "--session"), limit: parseLimit(args, 0) });
+  const seen = ledger && result.transcript ? recordFriction(result, ledger) : new Map;
   if (json) {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify({ ...result, friction: [...seen].map(([row, s]) => ({ row, ...s })) }, null, 2));
     return;
   }
   if (!result.transcript) {
@@ -1421,7 +1633,36 @@ function runGather(args, json) {
   console.log(`# ${result.transcript}`);
   console.log(`# ${s.lines} line(s) -> ${result.rows.length} row(s); ${s.deduped} duplicate(s) collapsed; ${ratio}x smaller than raw
 `);
-  console.log(formatDigest(result));
+  console.log(formatDigest(result, seen));
+}
+function runLedger(args, json) {
+  const [, verb, signature, fix] = args.positionals;
+  const ledger = ledgerPath();
+  if (!ledger)
+    throw new Error("ledger needs a git repo (the ledger is keyed on it)");
+  if (verb === "pending") {
+    if (!signature || !fix)
+      throw new Error('usage: context-index ledger pending "<signature>" "<fix and owner>"');
+    console.log(`pending: ${addPending(ledger, signature, fix)}`);
+  } else if (verb === "resolve") {
+    if (!signature)
+      throw new Error('usage: context-index ledger resolve "<signature>"');
+    if (!resolvePending(ledger, signature))
+      throw new Error(`no pending fix for "${signature}"`);
+    console.log("resolved");
+  } else if (verb === "list" || verb === undefined) {
+    const pending = [...pendingFixes(ledger)].map(([sig, fix]) => ({ signature: sig, fix }));
+    if (json)
+      console.log(JSON.stringify(pending, null, 2));
+    else if (!pending.length)
+      console.log("No pending source fixes.");
+    else
+      for (const p of pending)
+        console.log(`${p.signature}
+    -> ${p.fix}`);
+  } else {
+    throw new Error(`unknown ledger verb "${verb}" (pending | resolve | list)`);
+  }
 }
 function main(argv) {
   const args = parseArgs(argv);
@@ -1433,6 +1674,8 @@ function main(argv) {
   }
   if (cmd === "gather")
     return runGather(args, json);
+  if (cmd === "ledger")
+    return runLedger(args, json);
   const root = resolveRoot(flag(args, "--target"));
   switch (cmd) {
     case "ls":

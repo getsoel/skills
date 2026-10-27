@@ -15,7 +15,8 @@
  * else dropped — which measured ~124x smaller on that same transcript.
  *
  * The digest is STREAMED TO THE CALLER AND NEVER PERSISTED: nothing here writes
- * anywhere.
+ * anywhere. (The CLI separately records failure SIGNATURES - not the digest - in
+ * the friction ledger; see ledger.ts.)
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -194,12 +195,10 @@ export function digestLine(raw: string): DigestRow | null {
       : null;
   }
 
-  // A failed TOOL CALL and what it said. Narrower than "the session's failures":
-  // a command that exits non-zero inside Bash (a failing test, a `fatal:` from
-  // git) returns a SUCCESSFUL tool_result and is dropped as bulk below. Observed
-  // on a real session — several failed commands, exactly one is_error row, and it
-  // was a tool rejection. Widening this means keeping successful tool output,
-  // which is the bulk this digest exists to drop.
+  // A failed TOOL CALL and what it said: a rejection, a hook block, an MCP
+  // error, and - in current Claude Code - a Bash command that exited non-zero
+  // ("Exit code 1 …"; measured: 1,149 of 1,546 is_error rows across 681 real
+  // sessions). Successful tool output stays dropped as bulk.
   if (line.type === "user") {
     const err = errorOf(message?.content);
     return err ? { kind: "error", text: clip(err, MAX_ERROR_CHARS), ts } : null;
@@ -328,6 +327,16 @@ export interface GatherOpts extends ResolveOpts {
  */
 export function gatherDigest(opts: GatherOpts = {}): GatherResult {
   const { transcript, sessionId, missing } = resolveTranscript(opts);
+  return digestTranscript(transcript, sessionId, missing, opts.limit);
+}
+
+/** Read and digest a transcript already located on disk. */
+export function digestTranscript(
+  transcript: string | null,
+  sessionId: string | null,
+  missing = false,
+  limit?: number,
+): GatherResult {
   const empty: GatherStats = {
     lines: 0,
     extracted: 0,
@@ -353,8 +362,7 @@ export function gatherDigest(opts: GatherOpts = {}): GatherResult {
   }
 
   const { rows: deduped, removed } = dedupe(extracted);
-  const limited =
-    opts.limit && opts.limit > 0 ? deduped.slice(-opts.limit) : deduped;
+  const limited = limit && limit > 0 ? deduped.slice(-limit) : deduped;
 
   return {
     transcript,
@@ -380,11 +388,20 @@ const LABEL: Record<DigestKind, string> = {
   error: "ERR ",
 };
 
-/** Render a digest for a reader — the form reflect actually reasons over. */
-export function formatDigest(result: GatherResult): string {
+/**
+ * Render a digest for a reader — the form reflect actually reasons over. When
+ * the friction ledger annotated an error row, the row says how many earlier
+ * sessions hit the same failure: that count is what reflect's repetition gate reads.
+ */
+export function formatDigest(result: GatherResult, seen?: Map<number, { seenBefore: number; pending?: string }>): string {
   const out: string[] = [];
-  for (const row of result.rows) {
-    out.push(`${LABEL[row.kind]}  ${row.text}`);
+  for (const [i, row] of result.rows.entries()) {
+    const s = seen?.get(i);
+    const notes: string[] = [];
+    if (s && s.seenBefore > 0) notes.push(`seen in ${s.seenBefore} earlier session${s.seenBefore === 1 ? "" : "s"}`);
+    if (s?.pending !== undefined) notes.push(`source fix pending: ${s.pending}`);
+    const tag = notes.length ? `[${notes.join("; ")}] ` : "";
+    out.push(`${LABEL[row.kind]}  ${tag}${row.text}`);
     out.push("");
   }
   return out.join("\n");

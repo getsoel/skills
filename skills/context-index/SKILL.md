@@ -19,7 +19,7 @@ Curate the repo's lazy-loaded knowledge: a minimal root `CLAUDE.md`, one eager `
 - Each index entry - in the root index and in every sub-index - MUST have a "Use when:" trigger naming specific situations, not a topic label and not a catch-all ("navigating the repo", "overview").
 - NEVER tell the agent to read ahead ("when in doubt, read it", "always read"). A doc loads only when its trigger matches the task.
 - Budget what loads in tokens, not lines (§Load budgets). A line budget met by packing paragraphs onto 1,000-char lines is not met.
-- Only edit `context/`, `CLAUDE.md` (root + colocated), and - in `audit`, with approval - project skills. NEVER edit `CLAUDE.local.md`.
+- Only edit `context/`, `CLAUDE.md` (root + colocated), and - with per-item approval - project skills, repo code/scripts/hooks for a rung 1-2 fix (`references/reflect-heuristics.md`), the user's own machine and agent config for a source fix (back up the file first, verify it took), and the user's global instruction file for personal preferences. NEVER edit `CLAUDE.local.md`, and never change someone else's repo or system - give its owner a change request and record it pending.
 - All generated text MUST follow `references/formatting.md`.
 - Before declaring done, `context-index check` MUST pass with zero errors (`references/validation.md`).
 
@@ -53,16 +53,18 @@ Every always-loaded token competes with the task, and lazy files are only lazy i
 
 Distill the current session into durable instructions.
 
-1. **Gather.** Distill from the session's TRANSCRIPT, not the live context window - after a compaction the window holds a summary, and the corrections, constraints, and "why" this step exists to capture are the first things a summary drops. Run `context-index gather`: it digests the transcript on disk down to human turns verbatim, assistant prose clipped, tool errors kept, the rest dropped. Never read a transcript file directly - it would re-flood the context a compaction just freed. If it reports no transcript (or you are not Claude Code), scan the live context instead and say the pass was degraded. Extraction contract in `references/gather.md`; keep/drop rules in `references/reflect-heuristics.md`.
-2. **Classify each candidate.**
-   - **Gotcha/footgun? Try to eliminate it first.** Walk the remediation ladder (`references/reflect-heuristics.md` -> "Prefer the fix over the note"): fix the root cause in code, or add a harness check, before treating it as a doc. Surface those as code/harness recommendations (§Root-cause & harness fixes), not markdown.
+1. **Gather.** Distill from the session's TRANSCRIPT, not the live context window - after a compaction the window holds a summary, and the corrections, constraints, and "why" this step exists to capture are the first things a summary drops. Run `context-index gather`: it digests the transcript on disk down to human turns verbatim, assistant prose clipped, tool errors kept, the rest dropped. Never read a transcript file directly - it would re-flood the context a compaction just freed. If it reports no transcript (or you are not Claude Code), scan the live context instead and say the pass was degraded. Its `ERR` rows say `[seen in N earlier sessions]` from the repo's friction ledger - the count the repetition gate reads (seed a new repo once with `context-index gather --backfill`). Extraction contract in `references/gather.md`; keep/drop rules in `references/reflect-heuristics.md`.
+2. **Classify each candidate.** Candidates are user corrections AND failed tool calls - a call that failed for a repo or environment reason counts even if you recovered (`references/reflect-heuristics.md` -> "Failed tool calls are friction too").
+   - **Seen only once?** Apply the repetition gate: a first sighting goes in the session handoff, not the instructions.
+   - **Gotcha/footgun? Try to eliminate it first.** Walk the remediation ladder (`references/reflect-heuristics.md` -> "Prefer the fix over the note"): fix it at the source - which may be another repo, a tool's config, or the machine - or add a harness check, before treating it as a doc. Already documented and recurred anyway -> escalate a rung; never reword the doc.
+   - How the user works in any repo (PR habits, scope, tone) -> the user's global instruction file, never dropped.
    - Universal (fires every task) -> root `CLAUDE.md`.
    - Path-scoped (relevant under a specific directory) -> **colocated `<dir>/CLAUDE.md`** (§Colocated CLAUDE.md), within its load budget.
    - Scoped to related files that lack a shared directory -> recommend extracting a module (`references/nested-indexes.md`), then colocate.
    - Cross-cutting topic, fits an existing `context/<topic>.md` -> append there.
    - Cross-cutting topic, no existing file -> `context-index scaffold` a new doc + its index entry.
    - Filler, inferable, linter-handled, or personal -> drop.
-3. **Draft changes.** For each keeper: show the exact diff (append, edit, or new file). For new topic docs: show the full file + the new index line. Anchor drift-prone state facts per `references/anchored-claims.md` - prefer `source:`/`invariant:`/`verify:` over dated prose.
+3. **Draft changes.** For each keeper: show the exact diff (append, edit, or new file) - including rung 1-2 code, script, and hook fixes in this repo, written per "Writing agent hooks". For a source fix on the user's own machine or agent config, draft the exact command or config line - it is applied on approval like any diff. For a fix owned by someone else, draft the change request (owner, file, change) and record it pending (`context-index ledger pending`). Present source fixes before any guard for the same failure; a guard over a fixable cause is interim and says so. For new topic docs: show the full file + the new index line. Name each prose keeper's load point and check it would be in context when the problem recurs (`references/reflect-heuristics.md` -> "Where it loads"). Anchor drift-prone state facts per `references/anchored-claims.md` - prefer `source:`/`invariant:`/`verify:` over dated prose.
 4. **Confirm.** Present all drafts in one batch (a structured multi-select question where the agent has one, e.g. Claude Code's `AskUserQuestion`). The user approves, edits, or rejects per item.
 5. **Apply.** Write approved changes. Scaffold new topic files with `context-index scaffold <name> "<Use-when trigger>"` - it wires the index entry, so don't hand-edit `context/index.md`.
 6. **Verify.** `@context/index.md` still imported; entries are bare paths with specific triggers; no universal content leaked into a topic doc; no topic content leaked into `CLAUDE.md`; nothing you appended pushed a file or stack over its load budget. Then run `context-index check` and resolve every error before declaring done.
@@ -111,10 +113,10 @@ If the best "Use when:" trigger you can write is "every task", "every commit", "
 
 ## Root-cause & harness fixes
 
-Many "gotcha" candidates are better deleted than documented. Before drafting a doc for any footgun, apply the remediation ladder in `references/reflect-heuristics.md`. Surface these alongside the drafts - a recommendation, not an action:
+Many "gotcha" candidates are better deleted than documented. Before drafting a doc for any footgun, apply the remediation ladder in `references/reflect-heuristics.md`. Prefer, in order:
 
-- **Root-cause fix** - name the file and the change that removes the sharp edge.
-- **Harness check** - name the guard that would catch it: lint rule, `context-index check`, CI gate, test, type, preflight assertion, or an agent / pre-commit hook.
+- **Source fix** - remove the sharp edge where it lives, and present it FIRST even when you cannot apply it alone. In this repo, or on the user's own machine and agent config: draft the change in the same approval batch as the docs, and verify it took. In someone else's repo or system: a change request naming the owner, file, and change, recorded pending in the ledger - never edit it yourself.
+- **Harness check** - a lint rule, `context-index check`, CI gate, test, type, preflight assertion, pre-commit hook, or agent hook (written per "Writing agent hooks"): drafted as a diff, preferably a new row plus test in the repo's existing guard. When a source fix exists for the same cause, the guard is interim: it checks or names its own removal condition.
 - Only when neither is feasible, fall through to an anchored doc per `references/anchored-claims.md`.
 
 ## References

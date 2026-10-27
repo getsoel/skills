@@ -56,7 +56,7 @@ node .claude/skills/context-index/scripts/context-index.mjs check --quiet
 | `ls` | Lists the index tree |
 | `scaffold <name> "<trigger>"` | Creates a topic doc and wires its index entry |
 | `footguns` | Lists documented footguns, ranked |
-| `gather` | Digests the current Claude Code session transcript for `reflect` |
+| `gather` | Digests the current Claude Code session transcript for `reflect`, marking failures seen in earlier sessions (`--backfill` seeds that ledger) |
 
 Exclude foreign instruction files (vendored or legacy `CLAUDE.md`) by listing literal paths in a `.contextignore` at the repo root.
 
