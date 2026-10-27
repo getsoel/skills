@@ -2,6 +2,8 @@
 // `contractor context`). Agents use the bundled scripts/context-index.mjs instead.
 export { main } from "./cli";
 export * from "./check";
+export * from "./drift";
+export * from "./verify";
 export * from "./footguns";
 export * from "./gather";
 export * from "./ignore";

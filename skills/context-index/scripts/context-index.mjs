@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync7, realpathSync } from "node:fs";
-import { resolve as resolve2 } from "node:path";
+import { execFileSync as execFileSync4 } from "node:child_process";
+import { existsSync as existsSync8, realpathSync } from "node:fs";
+import { resolve as resolve3 } from "node:path";
 
 // src/check.ts
-import { existsSync as existsSync2, readFileSync as readFileSync2, readdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join as join2, relative } from "node:path";
+import { existsSync as existsSync3, readFileSync as readFileSync3, readdirSync, statSync as statSync2, writeFileSync } from "node:fs";
+import { basename, dirname as dirname2, join as join3, relative as relative2, resolve } from "node:path";
 
 // src/glob.ts
 function globStaticPrefix(glob) {
@@ -81,15 +81,277 @@ var INVARIANT_LABEL_RE = /\binvariant:/i;
 var FOOTGUN_WORD_RE = new RegExp(`\\b(?:${FOOTGUN_SIGNALS.map(esc).join("|")})\\b`, "i");
 var FOOTGUN_SECTION_RE = new RegExp(`^#{1,6}\\s+.*(?:${FOOTGUN_SECTIONS.map(flex).join("|")})`, "i");
 
+// src/drift.ts
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
+function segments(line) {
+  const out = [];
+  let i = 0;
+  while (i < line.length) {
+    const tick = line.indexOf("`", i);
+    if (tick === -1) {
+      out.push({ code: false, text: line.slice(i) });
+      break;
+    }
+    if (tick > i)
+      out.push({ code: false, text: line.slice(i, tick) });
+    const end = line.indexOf("`", tick + 1);
+    if (end === -1) {
+      out.push({ code: false, text: line.slice(tick) });
+      break;
+    }
+    out.push({ code: true, text: line.slice(tick + 1, end) });
+    i = end + 1;
+  }
+  return out;
+}
+function proseLines(text) {
+  const out = [];
+  let inFence = false;
+  text.split(`
+`).forEach((line, i) => {
+    const tok = line.trimStart().slice(0, 3);
+    if (tok === "```" || tok === "~~~") {
+      inFence = !inFence;
+      return;
+    }
+    if (!inFence)
+      out.push({ n: i + 1, line });
+  });
+  return out;
+}
+var PATH_TOKEN = /(?:^|[\s'"(=,:])((?:\.\.?\/)?[\w.@-]+(?:\/[\w.@-]+)+\/?)(?=$|[\s'"),;:])/g;
+var LINE_SUFFIX = /(?::\d+(?:-\d+)?)+$/;
+var GONE = /\b(?:no|removed|deleted|gone|retired|dropped|renamed|replaced|formerly|previously|used to|no longer|rewrite of|returns nothing|finds nothing|no hits|instead of|generated)\b/i;
+function pathRefs(line) {
+  return line.split(/(?<=[.!?])\s+(?=[A-Z`*(])/).filter((sentence) => !GONE.test(segments(sentence).filter((s) => !s.code).map((s) => s.text).join(""))).flatMap(sentencePathRefs);
+}
+function sentencePathRefs(line) {
+  const out = [];
+  for (const seg of segments(line)) {
+    if (!seg.code || /[*?<>{}$\[\]]|\.\.\./.test(seg.text))
+      continue;
+    for (const m of seg.text.matchAll(PATH_TOKEN)) {
+      const raw = m[1].replace(LINE_SUFFIX, "").replace(/[.,]+$/, "");
+      if (raw.startsWith("@") || /^[\w.-]+\.[a-z]{2,}\//i.test(raw))
+        continue;
+      if (/^\.\.?\//.test(raw) && !raw.endsWith("/") && !/\.\w+$/.test(raw.split("/").pop()))
+        continue;
+      out.push(raw);
+    }
+  }
+  return out;
+}
+function candidates(root, docDir, ref) {
+  const clean = ref.replace(/\/$/, "");
+  if (clean.startsWith("../"))
+    return [relative(root, join(docDir, clean))];
+  if (clean.startsWith("./"))
+    return [relative(root, join(docDir, clean)), clean.slice(2)];
+  const first = clean.split("/")[0];
+  const out = [];
+  if (existsSync(join(root, first)))
+    out.push(clean);
+  if (existsSync(join(docDir, first)))
+    out.push(relative(root, join(docDir, clean)));
+  return out;
+}
+var MODULE_EXT = ["", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".d.ts", "/index.ts", "/index.js"];
+var exists = (root, rel) => MODULE_EXT.some((ext) => existsSync(join(root, rel + ext)));
+function gitIgnored(root, paths) {
+  if (!paths.length)
+    return new Set;
+  try {
+    const out = execFileSync("git", ["check-ignore", "--no-index", "--stdin"], {
+      cwd: root,
+      input: paths.join(`
+`) + `
+`,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"]
+    });
+    return new Set(out.split(`
+`).filter(Boolean));
+  } catch (err) {
+    const stdout = err.stdout;
+    return new Set(typeof stdout === "string" ? stdout.split(`
+`).filter(Boolean) : []);
+  }
+}
+function trackedPaths(root) {
+  try {
+    const files = execFileSync("git", ["ls-files", "-z"], {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"]
+    }).split("\x00").filter(Boolean);
+    const all = new Set(files);
+    for (const f of files) {
+      for (let i = f.indexOf("/");i !== -1; i = f.indexOf("/", i + 1))
+        all.add(f.slice(0, i));
+    }
+    return [...all];
+  } catch {
+    return null;
+  }
+}
+function checkDeadPaths(root, files, add) {
+  const missing = [];
+  for (const file of files) {
+    const docDir = dirname(file);
+    for (const { n, line } of proseLines(readFileSync(file, "utf8"))) {
+      for (const ref of pathRefs(line)) {
+        if (/(?:^|\/)path\/to\//.test(ref))
+          continue;
+        const rels = candidates(root, docDir, ref).filter((r) => !r.startsWith(".."));
+        if (!rels.length || rels.some((r) => exists(root, r)))
+          continue;
+        missing.push({ file, n, ref, rel: rels[0] });
+      }
+    }
+  }
+  const ignored = gitIgnored(root, [...new Set(missing.flatMap((m) => [m.rel, m.rel + "/"]))]);
+  const tracked = missing.length ? trackedPaths(root) : null;
+  const abbreviation = new Map;
+  const isAbbreviation = (ref) => {
+    const tail = "/" + ref.replace(/^(?:\.\.?\/)+/, "").replace(/\/$/, "");
+    if (!abbreviation.has(tail)) {
+      let found = tracked?.some((p) => p.endsWith(tail)) ?? false;
+      if (!found && tracked) {
+        const head = "/" + tail.split("/")[1];
+        const alts = tracked.filter((p) => p.endsWith(head)).map((p) => p.slice(0, -head.length) + tail);
+        const ig = gitIgnored(root, alts.flatMap((a) => [a, a + "/"]));
+        found = alts.some((a) => ig.has(a) || ig.has(a + "/"));
+      }
+      abbreviation.set(tail, found);
+    }
+    return abbreviation.get(tail);
+  };
+  const seen = new Set;
+  for (const m of missing) {
+    if (ignored.has(m.rel) || ignored.has(m.rel + "/") || isAbbreviation(m.ref))
+      continue;
+    const key = `${m.file}:${m.n}:${m.rel}`;
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    add(m.file, m.n, "warn", `\`${m.ref}\` does not exist -> point at where it lives now, or drop the reference`);
+  }
+}
+var MIN_WORDS = 10;
+function normalize(sentence) {
+  return sentence.toLowerCase().replace(/[`*_>#|]/g, " ").replace(/[^\p{L}\p{N}\s./:@-]/gu, " ").replace(/\s+/g, " ").trim().replace(/[.:]+$/, "");
+}
+var POINTER = /`(?:\.\/)?context\/[^`]+\.md`|`[^`]*CLAUDE\.md`/;
+function ruleSentences(line) {
+  const body = line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").replace(/^#+\s.*$/, "");
+  return body.split(/(?<=[.!?])\s+(?=[A-Z`*(])/).filter((s) => !POINTER.test(s)).map(normalize).filter((s) => s.split(" ").length >= MIN_WORDS);
+}
+function checkCrossFileDuplicates(root, files, add) {
+  const where = new Map;
+  for (const file of files) {
+    for (const { n, line } of proseLines(readFileSync(file, "utf8"))) {
+      for (const s of ruleSentences(line)) {
+        const list = where.get(s) ?? [];
+        if (!list.some((w) => w.file === file))
+          list.push({ file, n });
+        where.set(s, list);
+      }
+    }
+  }
+  const flagged = new Set;
+  for (const list of where.values()) {
+    if (list.length < 2)
+      continue;
+    for (const w of list) {
+      const others = list.filter((o) => o !== w).map((o) => `${relative(root, o.file)}:${o.n}`);
+      const key = `${w.file}:${w.n}:${others.join(",")}`;
+      if (flagged.has(key))
+        continue;
+      flagged.add(key);
+      add(w.file, w.n, "warn", `same sentence as ${others.join(", ")} -> keep it in one doc and point to it from the other`);
+    }
+  }
+}
+var SYMBOL = /^(?:[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*)$/;
+var SOURCE_EXT = /\.(?:[cm]?[jt]sx?|json|ya?ml|cue|sql|sh|py|go|rs|rb|java|kt|swift|css|scss|html|vue|svelte|toml|graphql)$/;
+var MAX_SOURCE_BYTES = 2000000;
+function symbolRefs(line) {
+  const out = [];
+  for (const sentence of line.split(/(?<=[.!?])\s+(?=[A-Z`*(])/)) {
+    const segs = segments(sentence);
+    if (GONE.test(segs.filter((s) => !s.code).map((s) => s.text).join("")))
+      continue;
+    for (const seg of segs) {
+      const name = seg.code ? seg.text.replace(/\(\)$/, "") : "";
+      if (name.length >= 6 && SYMBOL.test(name))
+        out.push(name);
+    }
+  }
+  return out;
+}
+function sourceIdentifiers(root) {
+  let files;
+  try {
+    files = execFileSync("git", ["ls-files", "-z"], {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"]
+    }).split("\x00").filter((f) => SOURCE_EXT.test(f));
+  } catch {
+    return null;
+  }
+  const ids = new Set;
+  for (const f of files) {
+    let text;
+    try {
+      const p = join(root, f);
+      if (statSync(p).size > MAX_SOURCE_BYTES)
+        continue;
+      text = readFileSync(p, "utf8");
+    } catch {
+      continue;
+    }
+    for (const m of text.matchAll(/[A-Za-z_$][\w$]{5,}/g))
+      ids.add(m[0]);
+  }
+  return ids;
+}
+function checkDeadSymbols(root, files, add) {
+  const refs = [];
+  for (const file of files) {
+    for (const { n, line } of proseLines(readFileSync(file, "utf8"))) {
+      for (const name of symbolRefs(line))
+        refs.push({ file, n, name });
+    }
+  }
+  if (!refs.length)
+    return;
+  const ids = sourceIdentifiers(root);
+  if (!ids)
+    return;
+  const seen = new Set;
+  for (const r of refs) {
+    const key = `${r.file}:${r.n}:${r.name}`;
+    if (ids.has(r.name) || seen.has(key))
+      continue;
+    seen.add(key);
+    add(r.file, r.n, "warn", `\`${r.name}\` appears in no tracked source file -> renamed or removed? Update the doc (or it names another system's API)`);
+  }
+}
+
 // src/ignore.ts
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
+import { join as join2 } from "node:path";
 var IGNORE_FILE = ".contextignore";
 function loadIgnore(root, extra) {
   const raw = [];
-  const file = join(root, IGNORE_FILE);
-  if (existsSync(file)) {
-    for (const line of readFileSync(file, "utf8").split(`
+  const file = join2(root, IGNORE_FILE);
+  if (existsSync2(file)) {
+    for (const line of readFileSync2(file, "utf8").split(`
 `)) {
       const t = line.trim();
       if (t && !t.startsWith("#"))
@@ -210,7 +472,7 @@ var STOP = new Set([
 var STATE_VERB = /\b(verified|re-verified|confirmed|last (?:verified|checked)|as of)\b/i;
 var ISO_DATE = /\b\d{4}-\d{2}(?:-\d{2})?\b/;
 var ANCHOR_WINDOW = 6;
-function segments(line) {
+function segments2(line) {
   const out = [];
   let i = 0;
   while (i < line.length) {
@@ -231,7 +493,7 @@ function segments(line) {
   }
   return out;
 }
-var prose = (line) => segments(line).filter((s) => !s.code).map((s) => s.text).join("");
+var prose = (line) => segments2(line).filter((s) => !s.code).map((s) => s.text).join("");
 function keywords(text) {
   const out = new Set;
   for (const w of text.toLowerCase().match(/[a-z0-9][a-z0-9_./+-]{2,}/g) ?? []) {
@@ -243,18 +505,18 @@ function keywords(text) {
 var tokensOf = (text) => Math.round(text.length / CHARS_PER_TOKEN);
 function approxTokens(file) {
   try {
-    return tokensOf(readFileSync2(file, "utf8"));
+    return tokensOf(readFileSync3(file, "utf8"));
   } catch {
     return 0;
   }
 }
 function classify(root, file) {
-  const rel = relative(root, file);
+  const rel = relative2(root, file);
   const name = basename(file);
   if (name === "index.md" && (rel.startsWith("context/") || rel.startsWith("context\\")))
     return "index";
   if (name === "CLAUDE.md")
-    return dirname(rel) === "." ? "root" : "colocated";
+    return dirname2(rel) === "." ? "root" : "colocated";
   if (rel.startsWith("context/") || rel.startsWith("context\\"))
     return "topic";
   if (name === "CLAUDE.local.md")
@@ -271,8 +533,8 @@ function walk(root, dir, acc, isIgnored, counts) {
   for (const e of entries) {
     if (e.name.startsWith(".") && e.name !== ".claude" && e.name !== ".github")
       continue;
-    const full = join2(dir, e.name);
-    const rel = relative(root, full);
+    const full = join3(dir, e.name);
+    const rel = relative2(root, full);
     if (isIgnored(rel)) {
       if (e.isDirectory())
         counts.dirs++;
@@ -290,7 +552,7 @@ function walk(root, dir, acc, isIgnored, counts) {
   return acc;
 }
 function checkText(file, add) {
-  const lines = readFileSync2(file, "utf8").split(`
+  const lines = readFileSync3(file, "utf8").split(`
 `);
   let inFence = false;
   for (let n = 0;n < lines.length; n++) {
@@ -317,7 +579,7 @@ function checkLength(file, kind, add) {
   const b = BUDGET[kind];
   if (!b)
     return;
-  const n = readFileSync2(file, "utf8").split(`
+  const n = readFileSync3(file, "utf8").split(`
 `).length;
   if (n > b.err)
     add(file, n, "error", `${n} lines > ${b.err} budget for a ${kind} file -> extract content`);
@@ -336,7 +598,7 @@ function checkTokens(file, kind, add) {
     add(file, 0, "warn", `~${t} tokens > ${b.warn} (ideal) for a ${kind} file -> ${where}`);
 }
 function checkLongLines(file, add) {
-  const lines = readFileSync2(file, "utf8").split(`
+  const lines = readFileSync3(file, "utf8").split(`
 `);
   let inFence = false;
   let count = 0, longest = 0, first = 0;
@@ -361,9 +623,9 @@ function checkLongLines(file, add) {
   }
 }
 function checkStacks(root, colocated, add) {
-  const tokens = new Map(colocated.map((f) => [dirname(relative(root, f)), approxTokens(f)]));
+  const tokens = new Map(colocated.map((f) => [dirname2(relative2(root, f)), approxTokens(f)]));
   for (const file of colocated) {
-    let dir = dirname(relative(root, file));
+    let dir = dirname2(relative2(root, file));
     const stack = [];
     let total = 0;
     while (dir !== "." && dir !== "") {
@@ -372,7 +634,7 @@ function checkStacks(root, colocated, add) {
         stack.push(dir);
         total += t;
       }
-      dir = dirname(dir);
+      dir = dirname2(dir);
     }
     if (stack.length > 1 && total > STACK_TOKEN_WARN) {
       add(file, 0, "warn", `loads with ${plural(stack.length - 1, "ancestor CLAUDE.md", "ancestor CLAUDE.md files")} (${stack.slice(1).join(", ")}) for ~${total} tokens > ${STACK_TOKEN_WARN} -> slim the stack; move detail into context/ docs rather than another nested CLAUDE.md`);
@@ -381,7 +643,7 @@ function checkStacks(root, colocated, add) {
 }
 var plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 function checkReadAhead(file, add) {
-  readFileSync2(file, "utf8").split(`
+  readFileSync3(file, "utf8").split(`
 `).forEach((line, i) => {
     if (/^\s*-\s+/.test(line))
       return;
@@ -398,9 +660,9 @@ function checkBroadTriggers(root, entries, add) {
     const m = e.trigger.match(BROAD_TRIGGER);
     if (!m)
       continue;
-    const t = approxTokens(join2(root, e.path));
+    const t = approxTokens(join3(root, e.path));
     if (t > BROAD_DOC_TOKENS) {
-      add(join2(root, e.index), e.line, "warn", `broad trigger ("${m[0]}") routes a ~${t}-token doc onto nearly every task -> name the specific situations it serves, or move the always-needed lines into CLAUDE.md`);
+      add(join3(root, e.index), e.line, "warn", `broad trigger ("${m[0]}") routes a ~${t}-token doc onto nearly every task -> name the specific situations it serves, or move the always-needed lines into CLAUDE.md`);
     }
   }
 }
@@ -452,7 +714,7 @@ function workflowMetaField(src, key) {
 }
 function enabledPlugins(root) {
   try {
-    const s = JSON.parse(readFileSync2(join2(root, ".claude", "settings.json"), "utf8"));
+    const s = JSON.parse(readFileSync3(join3(root, ".claude", "settings.json"), "utf8"));
     return Object.entries(s.enabledPlugins ?? {}).filter(([, on]) => on === true).map(([name]) => name);
   } catch {
     return [];
@@ -464,18 +726,18 @@ function checkSkills(root, isIgnored, add) {
   for (const base of SKILL_DIRS) {
     let dirs;
     try {
-      dirs = readdirSync(join2(root, base), { withFileTypes: true });
+      dirs = readdirSync(join3(root, base), { withFileTypes: true });
     } catch {
       continue;
     }
     for (const d of dirs) {
-      const rel = join2(base, d.name);
+      const rel = join3(base, d.name);
       if (!d.isDirectory() || isIgnored(rel))
         continue;
-      const file = join2(root, rel, "SKILL.md");
-      if (!existsSync2(file))
+      const file = join3(root, rel, "SKILL.md");
+      if (!existsSync3(file))
         continue;
-      const text = readFileSync2(file, "utf8");
+      const text = readFileSync3(file, "utf8");
       const desc = skillDescription(text);
       if (!firstDir)
         firstDir = file;
@@ -497,14 +759,14 @@ function checkSkills(root, isIgnored, add) {
   let workflows = 0;
   let files = [];
   try {
-    files = readdirSync(join2(root, WORKFLOW_DIR)).filter((f) => /\.m?js$/.test(f)).sort();
+    files = readdirSync(join3(root, WORKFLOW_DIR)).filter((f) => /\.m?js$/.test(f)).sort();
   } catch {}
   for (const f of files) {
-    const rel = join2(WORKFLOW_DIR, f);
+    const rel = join3(WORKFLOW_DIR, f);
     if (isIgnored(rel))
       continue;
-    const file = join2(root, rel);
-    const src = readFileSync2(file, "utf8");
+    const file = join3(root, rel);
+    const src = readFileSync3(file, "utf8");
     const desc = workflowMetaField(src, "description");
     if (!desc)
       continue;
@@ -530,12 +792,12 @@ function checkSkills(root, isIgnored, add) {
 function checkRootImport(file, hasContextDir, add) {
   if (!hasContextDir)
     return;
-  if (!/^@context\/index\.md\s*$/m.test(readFileSync2(file, "utf8"))) {
+  if (!/^@context\/index\.md\s*$/m.test(readFileSync3(file, "utf8"))) {
     add(file, 0, "error", 'root CLAUDE.md must contain the line "@context/index.md"');
   }
 }
 function checkRootOrder(file, add, fix) {
-  const lines = readFileSync2(file, "utf8").split(`
+  const lines = readFileSync3(file, "utf8").split(`
 `);
   const headers = [];
   let inFence = false;
@@ -578,7 +840,7 @@ function checkRootOrder(file, add, fix) {
 function checkNoFencedCode(file, kind, add) {
   if (kind !== "root" && kind !== "colocated" && kind !== "index")
     return;
-  const lines = readFileSync2(file, "utf8").split(`
+  const lines = readFileSync3(file, "utf8").split(`
 `);
   for (let n = 0;n < lines.length; n++) {
     const tok = lines[n].trimStart().slice(0, 3);
@@ -595,7 +857,7 @@ function checkNoFencedCode(file, kind, add) {
 function checkStaleProse(file, kind, add) {
   if (kind !== "topic" && kind !== "root" && kind !== "colocated")
     return;
-  const lines = readFileSync2(file, "utf8").split(`
+  const lines = readFileSync3(file, "utf8").split(`
 `);
   let inFence = false;
   for (let n = 0;n < lines.length; n++) {
@@ -630,10 +892,10 @@ function walkIndexTree(root) {
   const visit = (rel, depth) => {
     seen.add(rel);
     tree.indexes.push(rel);
-    for (const e of parseIndexEntries(readFileSync2(join2(root, rel), "utf8"))) {
+    for (const e of parseIndexEntries(readFileSync3(join3(root, rel), "utf8"))) {
       const te = { ...e, index: rel, depth };
       tree.entries.push(te);
-      if (!isIndexPath(e.path) || !existsSync2(join2(root, e.path)))
+      if (!isIndexPath(e.path) || !existsSync3(join3(root, e.path)))
         continue;
       if (seen.has(e.path))
         tree.revisits.push(te);
@@ -641,7 +903,7 @@ function walkIndexTree(root) {
         visit(e.path, depth + 1);
     }
   };
-  if (existsSync2(join2(root, ROOT_INDEX)))
+  if (existsSync3(join3(root, ROOT_INDEX)))
     visit(ROOT_INDEX, 0);
   return tree;
 }
@@ -655,12 +917,12 @@ function listContextFiles(root, dir, acc = []) {
   for (const e of entries) {
     if (e.name.startsWith("."))
       continue;
-    const full = join2(dir, e.name);
+    const full = join3(dir, e.name);
     if (e.isDirectory()) {
       if (!PRUNE.has(e.name))
         listContextFiles(root, full, acc);
     } else if (e.isFile() && e.name.endsWith(".md")) {
-      acc.push(relative(root, full).split("\\").join("/"));
+      acc.push(relative2(root, full).split("\\").join("/"));
     }
   }
   return acc;
@@ -669,30 +931,30 @@ function checkIndexTree(root, contextDir, add) {
   const tree = walkIndexTree(root);
   const referenced = new Set([ROOT_INDEX]);
   for (const e of tree.entries) {
-    const indexFile = join2(root, e.index);
+    const indexFile = join3(root, e.index);
     if (e.eager)
       add(indexFile, e.line, "error", 'index entry uses eager "@" prefix -> use a bare path');
     if (e.path.startsWith("context/"))
       referenced.add(e.path);
     if (!e.hasUseWhen)
       add(indexFile, e.line, "error", `index entry "${e.path}" has no "Use when:" trigger`);
-    if (!existsSync2(join2(root, e.path))) {
+    if (!existsSync3(join3(root, e.path))) {
       const external = !e.path.startsWith("context/");
       add(indexFile, e.line, external ? "warn" : "error", `index points to missing file: ${e.path}${external ? " (external/managed? verify it resolves)" : ""}`);
     }
     for (const g of e.globs) {
       const prefix = globStaticPrefix(g);
-      if (prefix && !existsSync2(join2(root, prefix))) {
+      if (prefix && !existsSync3(join3(root, prefix))) {
         add(indexFile, e.line, "warn", `paths: glob \`${g}\` -> directory "${prefix}" doesn't exist (stale glob? dir renamed/removed)`);
       }
     }
   }
   for (const r of tree.revisits) {
-    add(join2(root, r.index), r.line, "warn", `index entry "${r.path}" points at an index already reached -> list each index from exactly one parent (a cycle or a second parent)`);
+    add(join3(root, r.index), r.line, "warn", `index entry "${r.path}" points at an index already reached -> list each index from exactly one parent (a cycle or a second parent)`);
   }
   for (const rel of tree.indexes) {
     const own = tree.entries.filter((e) => e.index === rel);
-    const file = join2(root, rel);
+    const file = join3(root, rel);
     if (own.length > INDEX_SOFT_MAX) {
       add(file, 0, "warn", rel === ROOT_INDEX ? `${own.length} index entries > ${INDEX_SOFT_MAX} soft cap -> the eager index is itself a context cost; split by area into context/<area>/index.md sub-indexes` : `${own.length} entries > ${INDEX_SOFT_MAX} soft cap for one index -> split this area further`);
     }
@@ -701,7 +963,7 @@ function checkIndexTree(root, contextDir, add) {
   for (const rel of listContextFiles(root, contextDir)) {
     if (referenced.has(rel))
       continue;
-    add(join2(root, rel), 0, "error", isIndexPath(rel) ? "sub-index not referenced by any index reachable from context/index.md -> list it in a parent index or delete it (its docs never lazy-load)" : "topic doc not referenced by any index reachable from context/index.md -> add an entry or delete the file (orphans never lazy-load)");
+    add(join3(root, rel), 0, "error", isIndexPath(rel) ? "sub-index not referenced by any index reachable from context/index.md -> list it in a parent index or delete it (its docs never lazy-load)" : "topic doc not referenced by any index reachable from context/index.md -> add an entry or delete the file (orphans never lazy-load)");
   }
   return tree;
 }
@@ -732,13 +994,13 @@ function checkTriggerDrift(root, entries, add) {
   for (const e of entries) {
     if (!e.path.startsWith("context/"))
       continue;
-    const f = join2(root, e.path);
-    if (!existsSync2(f))
+    const f = join3(root, e.path);
+    if (!existsSync3(f))
       continue;
     const kws = [...keywords(e.trigger)];
     if (kws.length < 3)
       continue;
-    const body = readFileSync2(f, "utf8").toLowerCase();
+    const body = readFileSync3(f, "utf8").toLowerCase();
     const missing = kws.filter((w) => !body.includes(w));
     const coverage = (kws.length - missing.length) / kws.length;
     if (coverage < 0.4) {
@@ -751,34 +1013,37 @@ function checkDuplicates(root, contextDir, add) {
   for (const rel of listContextFiles(root, contextDir)) {
     if (isIndexPath(rel))
       continue;
-    const norm = readFileSync2(join2(root, rel), "utf8").replace(/^#.*$/m, "").replace(/\s+/g, " ").trim();
+    const norm = readFileSync3(join3(root, rel), "utf8").replace(/^#.*$/m, "").replace(/\s+/g, " ").trim();
     const list = bodies.get(norm) ?? [];
     list.push(rel);
     bodies.set(norm, list);
   }
   for (const [, list] of bodies) {
     if (list.length > 1) {
-      add(join2(root, list[0]), 0, "error", `identical body to ${list.slice(1).join(", ")} -> merge into one and delete the rest`);
+      add(join3(root, list[0]), 0, "error", `identical body to ${list.slice(1).join(", ")} -> merge into one and delete the rest`);
     }
   }
 }
 function checkContext(root, opts = {}) {
   const findings = [];
   const add = (file, line, sev, msg) => {
-    findings.push({ file: relative(root, file) || basename(file), line, sev, msg });
+    findings.push({ file: relative2(root, file) || basename(file), line, sev, msg });
   };
   let fixed = 0;
   const isIgnored = makeIsIgnored(loadIgnore(root, opts.ignore));
   const ignored = { files: 0, dirs: 0 };
-  const contextDir = join2(root, "context");
-  const hasContextDir = existsSync2(contextDir) && statSync(contextDir).isDirectory();
+  const contextDir = join3(root, "context");
+  const hasContextDir = existsSync3(contextDir) && statSync2(contextDir).isDirectory();
   const colocated = [];
+  const docs = [];
   for (const file of walk(root, root, [], isIgnored, ignored)) {
     const kind = classify(root, file);
     if (kind === "skip" || kind === "other")
       continue;
     if (kind === "colocated")
       colocated.push(file);
+    if (kind !== "index")
+      docs.push(file);
     if (kind === "index")
       checkReadAhead(file, add);
     checkText(file, add);
@@ -796,8 +1061,8 @@ function checkContext(root, opts = {}) {
   let entryCount = 0;
   let indexCount = 0;
   if (hasContextDir) {
-    const indexFile = join2(contextDir, "index.md");
-    if (existsSync2(indexFile)) {
+    const indexFile = join3(contextDir, "index.md");
+    if (existsSync3(indexFile)) {
       const tree = checkIndexTree(root, contextDir, add);
       entryCount = tree.entries.length;
       indexCount = tree.indexes.length;
@@ -805,8 +1070,8 @@ function checkContext(root, opts = {}) {
       checkBroadTriggers(root, tree.entries, add);
     }
     checkDuplicates(root, contextDir, add);
-    const rootClaude = join2(root, "CLAUDE.md");
-    if (existsSync2(rootClaude) && existsSync2(indexFile)) {
+    const rootClaude = join3(root, "CLAUDE.md");
+    if (existsSync3(rootClaude) && existsSync3(indexFile)) {
       const t = approxTokens(rootClaude) + approxTokens(indexFile);
       if (t > ALWAYS_LOADED_TOKEN_WARN) {
         add(rootClaude, 0, "warn", `always-loaded layer (root CLAUDE.md + index) ~${t} tokens > ${ALWAYS_LOADED_TOKEN_WARN} -> trim; every always-loaded token competes with task instructions`);
@@ -815,15 +1080,28 @@ function checkContext(root, opts = {}) {
   }
   checkStacks(root, colocated, add);
   checkSkills(root, isIgnored, add);
-  return { findings, entries: entryCount, indexes: indexCount, fixed, ignored };
+  checkDeadPaths(root, docs, add);
+  checkCrossFileDuplicates(root, docs, add);
+  if (opts.symbols)
+    checkDeadSymbols(root, docs, add);
+  const only = opts.only?.length ? new Set(opts.only.map((f) => relative2(root, resolve(root, f)))) : null;
+  const shown = only ? findings.filter((f) => only.has(f.file)) : findings;
+  return { findings: shown, entries: entryCount, indexes: indexCount, fixed, ignored };
+}
+function corpusDocs(root, ignore) {
+  const isIgnored = makeIsIgnored(loadIgnore(root, ignore));
+  return walk(root, root, [], isIgnored, { files: 0, dirs: 0 }).filter((f) => {
+    const kind = classify(root, f);
+    return kind !== "skip" && kind !== "other";
+  });
 }
 function loadIndexTree(root) {
   return walkIndexTree(root).entries;
 }
 
 // src/footguns.ts
-import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
-import { join as join3, relative as relative2 } from "node:path";
+import { existsSync as existsSync4, readdirSync as readdirSync2, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
+import { join as join4, relative as relative3 } from "node:path";
 var PRUNE2 = new Set([
   "node_modules",
   ".git",
@@ -872,8 +1150,8 @@ function walk2(root, dir, acc, isIgnored) {
   for (const e of entries) {
     if (e.name.startsWith(".") && e.name !== ".claude" && e.name !== ".github")
       continue;
-    const full = join3(dir, e.name);
-    const rel = relative2(root, full).split("\\").join("/");
+    const full = join4(dir, e.name);
+    const rel = relative3(root, full).split("\\").join("/");
     if (isIgnored(rel))
       continue;
     if (e.isDirectory()) {
@@ -889,7 +1167,7 @@ function walk2(root, dir, acc, isIgnored) {
   return acc;
 }
 function scan(root, file) {
-  const lines = readFileSync3(file, "utf8").split(`
+  const lines = readFileSync4(file, "utf8").split(`
 `);
   const guardLines = [];
   lines.forEach((l, i) => {
@@ -944,12 +1222,12 @@ function scan(root, file) {
     category: CAT[f.cat],
     section: f.section,
     text: f.text,
-    file: relative2(root, file).split("\\").join("/"),
+    file: relative3(root, file).split("\\").join("/"),
     line: line + 1
   }));
 }
 function findFootguns(root, opts = {}) {
-  if (!existsSync3(root) || !statSync2(root).isDirectory()) {
+  if (!existsSync4(root) || !statSync3(root).isDirectory()) {
     throw new Error(`not a directory: ${root}`);
   }
   const isIgnored = makeIsIgnored(loadIgnore(root, opts.ignore));
@@ -973,17 +1251,17 @@ function findFootguns(root, opts = {}) {
 }
 
 // src/gather.ts
-import { existsSync as existsSync4, readdirSync as readdirSync3, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync5, readdirSync as readdirSync3, readFileSync as readFileSync5, statSync as statSync4 } from "node:fs";
 import { homedir } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 function encodeProjectPath(absPath) {
   return absPath.replace(/[^a-zA-Z0-9]/g, "-");
 }
 function claudeProjectsRoot() {
-  return join4(homedir(), ".claude", "projects");
+  return join5(homedir(), ".claude", "projects");
 }
 function claudeProjectDir(absPath) {
-  return join4(claudeProjectsRoot(), encodeProjectPath(absPath));
+  return join5(claudeProjectsRoot(), encodeProjectPath(absPath));
 }
 function newestSession(cwd) {
   const dir = claudeProjectDir(cwd);
@@ -997,10 +1275,10 @@ function newestSession(cwd) {
   for (const entry of entries) {
     if (!entry.endsWith(".jsonl"))
       continue;
-    const full = join4(dir, entry);
+    const full = join5(dir, entry);
     let mtime;
     try {
-      mtime = statSync3(full).mtimeMs;
+      mtime = statSync4(full).mtimeMs;
     } catch {
       continue;
     }
@@ -1091,8 +1369,8 @@ function resolveTranscript(opts = {}) {
   const explicit = opts.sessionId !== undefined;
   const sessionId = opts.sessionId ?? process.env.CLAUDE_CODE_SESSION_ID ?? null;
   if (sessionId) {
-    const direct = join4(claudeProjectDir(cwd), `${sessionId}.jsonl`);
-    if (existsSync4(direct))
+    const direct = join5(claudeProjectDir(cwd), `${sessionId}.jsonl`);
+    if (existsSync5(direct))
       return { transcript: direct, sessionId, missing: false };
     const root = claudeProjectsRoot();
     let dirs;
@@ -1102,8 +1380,8 @@ function resolveTranscript(opts = {}) {
       dirs = [];
     }
     for (const dir of dirs) {
-      const candidate = join4(root, dir, `${sessionId}.jsonl`);
-      if (existsSync4(candidate))
+      const candidate = join5(root, dir, `${sessionId}.jsonl`);
+      if (existsSync5(candidate))
         return { transcript: candidate, sessionId, missing: false };
     }
     if (explicit)
@@ -1130,7 +1408,7 @@ function digestTranscript(transcript, sessionId, missing = false, limit) {
     return { transcript: null, sessionId, missing, rows: [], stats: empty };
   let raw;
   try {
-    raw = readFileSync4(transcript, "utf8");
+    raw = readFileSync5(transcript, "utf8");
   } catch {
     return { transcript, sessionId, missing, rows: [], stats: empty };
   }
@@ -1181,10 +1459,10 @@ function formatDigest(result, seen) {
 }
 
 // src/ledger.ts
-import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync as existsSync5, mkdirSync, readFileSync as readFileSync5, readdirSync as readdirSync4 } from "node:fs";
+import { execFileSync as execFileSync2 } from "node:child_process";
+import { appendFileSync, existsSync as existsSync6, mkdirSync, readFileSync as readFileSync6, readdirSync as readdirSync4 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, isAbsolute, join as join5, resolve } from "node:path";
+import { dirname as dirname3, isAbsolute, join as join6, resolve as resolve2 } from "node:path";
 var ERROR_LINE = /\b(error|fatal|not found|no such|denied|blocked|timed out|cannot|can't|failed|traceback|refused|unauthori[sz]ed|forbidden|no matches|not allowed|invalid)\b/i;
 var FRAME_LINE = /^(#+ |traceback \(most recent call last\)|at |node:internal|file "|\^|throw )/i;
 var HARNESS_NOISE = /doesn't want to proceed with this tool use|tool use was rejected|<tool_use_error>(string to replace not found|file has not been read yet|file has been modified since read|found \d+ matches of the string)/i;
@@ -1202,7 +1480,7 @@ function signatureOf(error) {
 }
 function git(cwd, args) {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+    return execFileSync2("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
   } catch {
     return null;
   }
@@ -1214,18 +1492,18 @@ function ledgerPath(cwd = process.cwd()) {
   const origin = git(cwd, ["remote", "get-url", "origin"]);
   if (origin) {
     const key = normalizeRemote(origin).replace(/[^a-z0-9.]+/g, "-");
-    return join5(homedir2(), ".claude", "context-index", "ledgers", `${key}.jsonl`);
+    return join6(homedir2(), ".claude", "context-index", "ledgers", `${key}.jsonl`);
   }
   const common = git(cwd, ["rev-parse", "--git-common-dir"]);
   if (!common)
     return null;
-  return join5(isAbsolute(common) ? common : resolve(cwd, common), "context-index", "friction.jsonl");
+  return join6(isAbsolute(common) ? common : resolve2(cwd, common), "context-index", "friction.jsonl");
 }
 function readLedger(path) {
-  if (!existsSync5(path))
+  if (!existsSync6(path))
     return [];
   const out = [];
-  for (const raw of readFileSync5(path, "utf8").split(`
+  for (const raw of readFileSync6(path, "utf8").split(`
 `)) {
     if (!raw.trim())
       continue;
@@ -1242,9 +1520,9 @@ function signatureKey(text) {
 }
 function pendingFixes(path) {
   const out = new Map;
-  if (!existsSync5(path))
+  if (!existsSync6(path))
     return out;
-  for (const raw of readFileSync5(path, "utf8").split(`
+  for (const raw of readFileSync6(path, "utf8").split(`
 `)) {
     if (!raw.trim())
       continue;
@@ -1262,7 +1540,7 @@ function pendingFixes(path) {
   return out;
 }
 function appendLine(path, line) {
-  mkdirSync(dirname2(path), { recursive: true });
+  mkdirSync(dirname3(path), { recursive: true });
   appendFileSync(path, JSON.stringify(line) + `
 `);
 }
@@ -1311,7 +1589,7 @@ function recordFriction(result, path) {
   });
   if (fresh.length) {
     try {
-      mkdirSync(dirname2(path), { recursive: true });
+      mkdirSync(dirname3(path), { recursive: true });
       appendFileSync(path, fresh.map((e) => JSON.stringify(e)).join(`
 `) + `
 `);
@@ -1322,7 +1600,7 @@ function recordFriction(result, path) {
 function transcriptCwd(path) {
   let head;
   try {
-    head = readFileSync5(path, "utf8").slice(0, 64000);
+    head = readFileSync6(path, "utf8").slice(0, 64000);
   } catch {
     return null;
   }
@@ -1348,19 +1626,19 @@ function backfillLedger(path) {
   for (const dir of dirs.sort()) {
     let entries;
     try {
-      entries = readdirSync4(join5(claudeProjectsRoot(), dir));
+      entries = readdirSync4(join6(claudeProjectsRoot(), dir));
     } catch {
       continue;
     }
     for (const entry of entries.sort()) {
       if (!entry.endsWith(".jsonl"))
         continue;
-      const transcript = join5(claudeProjectsRoot(), dir, entry);
+      const transcript = join6(claudeProjectsRoot(), dir, entry);
       const cwd = transcriptCwd(transcript);
       if (!cwd)
         continue;
       if (!owner.has(cwd))
-        owner.set(cwd, existsSync5(cwd) ? ledgerPath(cwd) : null);
+        owner.set(cwd, existsSync6(cwd) ? ledgerPath(cwd) : null);
       if (owner.get(cwd) !== path)
         continue;
       recordFriction(digestTranscript(transcript, entry.slice(0, -".jsonl".length)), path);
@@ -1371,8 +1649,8 @@ function backfillLedger(path) {
 }
 
 // src/scaffold.ts
-import { existsSync as existsSync6, readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join6 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync7, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join7 } from "node:path";
 function normalizeTopicName(raw) {
   return raw.replace(/\.md$/i, "").replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/[_\s]+/g, "-").toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
@@ -1390,16 +1668,16 @@ function scaffoldTopic(root, rawName, rawTrigger, opts = {}) {
   const area = (opts.area ?? "").replace(/^context\//, "").split("/").map(normalizeTopicName).filter(Boolean).join("/");
   const dirRel = area ? `context/${area}` : "context";
   const indexRel = `${dirRel}/index.md`;
-  const indexFile = join6(root, indexRel);
-  if (!existsSync6(indexFile)) {
+  const indexFile = join7(root, indexRel);
+  if (!existsSync7(indexFile)) {
     throw new Error(area ? `no ${indexRel} under ${root} - create the area index and list it from a parent index first (scaffold adds INTO an existing index)` : `no context/index.md under ${root} - create it first with a "# Context index" title and an IMPORTANT directive line - e.g. "IMPORTANT: Read an entry only when your task matches its Use when. Don't read ahead." (scaffold adds entries INTO an existing index)`);
   }
   const topicRel = `${dirRel}/${name}.md`;
-  const topicFile = join6(root, topicRel);
-  if (existsSync6(topicFile)) {
+  const topicFile = join7(root, topicRel);
+  if (existsSync7(topicFile)) {
     throw new Error(`${topicRel} already exists - edit it directly or pick another name`);
   }
-  const indexLines = readFileSync6(indexFile, "utf8").split(`
+  const indexLines = readFileSync7(indexFile, "utf8").split(`
 `);
   for (let i = 0;i < indexLines.length; i++) {
     if (entryPath(indexLines[i]) === topicRel) {
@@ -1441,6 +1719,105 @@ section, self-contained, under 200 lines. Delete this TODO when filled.
   return { name, topicRel, indexRel, entryLine, normalized: name !== rawName.replace(/\.md$/i, "") };
 }
 
+// src/verify.ts
+import { execFileSync as execFileSync3 } from "node:child_process";
+import { readFileSync as readFileSync8 } from "node:fs";
+import { relative as relative4 } from "node:path";
+var ANCHOR = /verify:`?\s*`([^`]+)`([^`]{0,80})/g;
+var EMPTY = /\b(?:returns nothing|finds nothing|prints nothing|no hits|no matches?|is empty)\b/i;
+var ZERO = /^\s*(?:\(0\)|->\s*0\b|=\s*0\b|returns 0\b|prints 0\b)/i;
+var READ_ONLY = /^(?:git (?:grep|ls-files)|grep|ls|test|wc|sort|uniq|head|tail|cut)\b/;
+var UNSAFE = /[;&<>`]|\$\(|\$\{|\|\|/;
+var TIMEOUT_MS = 1e4;
+function expectation(rest) {
+  if (EMPTY.test(rest))
+    return "empty";
+  if (ZERO.test(rest))
+    return "zero";
+  return null;
+}
+function refuseReason(command) {
+  if (UNSAFE.test(command))
+    return "uses shell syntax beyond a plain pipe";
+  for (const stage of command.split("|")) {
+    if (!READ_ONLY.test(stage.trim()))
+      return `\`${stage.trim().split(/\s+/)[0]}\` is not on the read-only list`;
+  }
+  return null;
+}
+function runVerifies(root, files, opts = {}) {
+  const out = [];
+  for (const file of files) {
+    const lines = readFileSync8(file, "utf8").split(`
+`);
+    lines.forEach((text, i) => {
+      for (const m of text.matchAll(ANCHOR)) {
+        const command = m[1].trim();
+        const expect = expectation(m[2] ?? "");
+        const base = { file: relative4(root, file), line: i + 1, command, expect };
+        const refused = refuseReason(command);
+        if (refused) {
+          out.push({ ...base, outcome: "unchecked", detail: refused });
+          continue;
+        }
+        if (!opts.run) {
+          out.push({ ...base, outcome: "unchecked", detail: "not run (pass --run)" });
+          continue;
+        }
+        out.push({ ...base, ...execute(root, command, expect) });
+      }
+    });
+  }
+  return out;
+}
+function isGitIgnored(root, path) {
+  try {
+    execFileSync3("git", ["check-ignore", "-q", "--no-index", path.replace(/\/$/, "")], { cwd: root, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function execute(root, command, expect) {
+  let stdout = "";
+  let code = 0;
+  let stderr = "";
+  try {
+    stdout = execFileSync3("sh", ["-c", command], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  } catch (err) {
+    const e = err;
+    if (e.signal)
+      return { outcome: "unchecked", detail: `timed out after ${TIMEOUT_MS / 1000}s` };
+    code = e.status ?? 2;
+    stdout = e.stdout ?? "";
+    stderr = e.stderr ?? "";
+  }
+  const head = (s) => s.trim().split(`
+`).slice(0, 3).join(" | ").slice(0, 200);
+  if (code >= 2 || code === 1 && stderr.trim()) {
+    const gone = [...stderr.matchAll(/(\S+): No such file or directory/g)].map((m) => m[1].replace(/^\w+: /, ""));
+    if (gone.length && gone.every((p) => isGitIgnored(root, p))) {
+      return { outcome: "unchecked", detail: `needs an untracked file: ${gone[0]}` };
+    }
+    return { outcome: "broken", detail: head(stderr || stdout) || `exit ${code}` };
+  }
+  const output = stdout.trim();
+  if (expect === "empty")
+    return output ? { outcome: "drift", detail: head(output) } : { outcome: "conform", detail: "" };
+  if (expect === "zero") {
+    const counts = output.split(`
+`).map((l) => Number(l.split(":").pop().trim()));
+    const zero = !output || counts.every((n) => n === 0);
+    return zero ? { outcome: "conform", detail: "" } : { outcome: "drift", detail: head(output) };
+  }
+  return { outcome: "unchecked", detail: "ran; the doc states no machine-readable expectation" };
+}
+
 // src/cli.ts
 var USAGE = `usage: context-index <command> [options]
 
@@ -1450,6 +1827,10 @@ Commands:
                            [--fix] relocate a misplaced @context/index.md import
                            [--ignore <a,b>] skip foreign paths (also reads .contextignore)
                            [--quiet] print errors only (for commit hooks and CI)
+                           [--file <path>] report findings for this doc only (repeatable)
+                           [--symbols] also flag backticked identifiers no source file contains
+  verify                 List the corpus's verify: anchors; --run executes the read-only ones and
+                         reports conform / drift / broken / unchecked (exit 1 on drift or broken)
   scaffold <name> "<Use when trigger>"
                          New topic doc + wired index entry [--in <area>] [--no-check]
   footguns               Documented footguns to triage into fixes/checks [--limit N]
@@ -1462,7 +1843,7 @@ Commands:
 Options:
   --target <path>        Repo to operate on (default: the git toplevel of the cwd)
   --json                 Machine-readable output (ls, check, footguns, gather, ledger list)`;
-var VALUE_FLAGS = new Set(["--target", "--ignore", "--in", "--limit", "--session"]);
+var VALUE_FLAGS = new Set(["--target", "--ignore", "--in", "--limit", "--session", "--file"]);
 function parseArgs(argv) {
   const positionals = [];
   const flags = new Map;
@@ -1490,16 +1871,16 @@ var flag = (args, name) => args.flags.get(name)?.at(-1);
 var has = (args, name) => args.flags.has(name);
 var list = (args, name) => (args.flags.get(name) ?? []).flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean);
 function resolveRoot(target) {
-  const start = resolve2(target ?? process.cwd());
+  const start = resolve3(target ?? process.cwd());
   let root = start;
   try {
-    root = execFileSync2("git", ["rev-parse", "--show-toplevel"], {
+    root = execFileSync4("git", ["rev-parse", "--show-toplevel"], {
       cwd: start,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim() || start;
   } catch {}
-  return existsSync7(root) ? realpathSync(root) : root;
+  return existsSync8(root) ? realpathSync(root) : root;
 }
 var plural2 = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 function runLs(root, json) {
@@ -1521,7 +1902,12 @@ ${plural2(entries.length, "entry", "entries")}${indexes > 1 ? ` across ${indexes
 }
 function runCheck(root, args, json) {
   const fix = has(args, "--fix");
-  const result = checkContext(root, { fix, ignore: list(args, "--ignore") });
+  const result = checkContext(root, {
+    fix,
+    ignore: list(args, "--ignore"),
+    symbols: has(args, "--symbols"),
+    only: list(args, "--file")
+  });
   const errs = result.findings.filter((f) => f.sev === "error").length;
   const warns = result.findings.length - errs;
   if (json) {
@@ -1544,6 +1930,28 @@ ${plural2(result.entries, "index entry", "index entries")}${result.indexes > 1 ?
     }
   }
   if (errs > 0)
+    process.exitCode = 1;
+}
+function runVerify(root, args, json) {
+  const results = runVerifies(root, corpusDocs(root, list(args, "--ignore")), { run: has(args, "--run") });
+  if (json) {
+    console.log(JSON.stringify(results, null, 2));
+  } else {
+    const counts = { conform: 0, drift: 0, broken: 0, unchecked: 0 };
+    for (const r of results)
+      counts[r.outcome]++;
+    for (const r of results.filter((r) => r.outcome === "drift" || r.outcome === "broken")) {
+      console.log(`  ${r.outcome.padEnd(6)} ${r.file}:${r.line}  ${r.command}
+           -> ${r.detail}`);
+    }
+    console.log(`
+${plural2(results.length, "verify anchor", "verify anchors")}: ${counts.conform} conform, ${counts.drift} drift, ${counts.broken} broken, ${counts.unchecked} unchecked`);
+    if (!has(args, "--run"))
+      console.log("Nothing was run. Pass --run to execute the read-only ones.");
+    else if (counts.unchecked)
+      console.log("Unchecked = not read-only, or the doc states no empty/zero expectation: run those by hand.");
+  }
+  if (results.some((r) => r.outcome === "drift" || r.outcome === "broken"))
     process.exitCode = 1;
 }
 function runScaffold(root, args) {
@@ -1686,6 +2094,8 @@ function main(argv) {
       return runScaffold(root, args);
     case "footguns":
       return runFootguns(root, args, json);
+    case "verify":
+      return runVerify(root, args, json);
     default:
       throw new Error(`unknown command "${cmd}"
 

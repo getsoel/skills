@@ -25,7 +25,7 @@ Specifically:
 
 <100 lines ideal. 100-150 acceptable. >150 means something that looks universal is actually domain-scoped - extract it.
 
-Colocated `<dir>/CLAUDE.md` files: <200 lines AND ~2.5k tokens (error at ~5k). A file loads with every colocated CLAUDE.md above it, so keep each stack under ~6k tokens. Over budget, move long-form detail (runbooks, design rationale, reference tables) into a `context/<topic>.md` behind a specific trigger - not into a deeper nested CLAUDE.md, which lengthens the stack.
+Colocated `<dir>/CLAUDE.md` files: <200 lines AND ~2.5k tokens (error at ~5k). A file loads with every colocated CLAUDE.md above it, so keep each stack under ~6k tokens. Over budget, move long-form detail (runbooks, design rationale, reference tables) into a `context/<topic>.md` behind a specific trigger - not into a deeper nested CLAUDE.md, which lengthens the stack. Move, don't copy, and drop history rather than moving it (`references/moving-content.md`).
 
 The always-loaded layer is root CLAUDE.md PLUS the eager `context/index.md` - they load together every session, so budget them jointly and keep the combined size small. Adherence drops as instruction count grows, and accuracy drops with raw context length even when the relevant text is present - so treat every index entry as spending the same budget as a root line. The validator warns when the combined layer exceeds ~2500 tokens.
 

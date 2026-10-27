@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { globStaticPrefix } from "./glob";
 import { isIndexPath, parseIndexEntries, type IndexEntry } from "./index-entry";
 import { ANCHOR_LABEL_RE } from "./vocabulary";
+import { checkCrossFileDuplicates, checkDeadPaths, checkDeadSymbols } from "./drift";
 import { loadIgnore, makeIsIgnored } from "./ignore";
 
 export interface ContextFinding {
@@ -19,6 +20,12 @@ export interface ContextOptions {
   fix?: boolean;
   /** Extra literal paths to skip, on top of `.contextignore` at the root. */
   ignore?: string[];
+  /** Also flag backticked code identifiers no tracked source file contains. Reads every
+   * source file, and names of other systems' APIs show up too - an audit aid, not a gate. */
+  symbols?: boolean;
+  /** Report findings for these repo-relative files only. The whole corpus is still read, so
+   * cross-file checks (duplicates, orphans) stay correct. */
+  only?: string[];
 }
 
 export interface ContextResult {
@@ -677,10 +684,12 @@ export function checkContext(root: string, opts: ContextOptions = {}): ContextRe
   const hasContextDir = existsSync(contextDir) && statSync(contextDir).isDirectory();
 
   const colocated: string[] = [];
+  const docs: string[] = [];
   for (const file of walk(root, root, [], isIgnored, ignored)) {
     const kind = classify(root, file);
     if (kind === "skip" || kind === "other") continue;
     if (kind === "colocated") colocated.push(file);
+    if (kind !== "index") docs.push(file);
     if (kind === "index") checkReadAhead(file, add);
     checkText(file, add);
     checkLength(file, kind, add);
@@ -717,8 +726,22 @@ export function checkContext(root: string, opts: ContextOptions = {}): ContextRe
 
   checkStacks(root, colocated, add);
   checkSkills(root, isIgnored, add);
+  checkDeadPaths(root, docs, add);
+  checkCrossFileDuplicates(root, docs, add);
+  if (opts.symbols) checkDeadSymbols(root, docs, add);
 
-  return { findings, entries: entryCount, indexes: indexCount, fixed, ignored };
+  const only = opts.only?.length ? new Set(opts.only.map((f) => relative(root, resolve(root, f)))) : null;
+  const shown = only ? findings.filter((f) => only.has(f.file)) : findings;
+  return { findings: shown, entries: entryCount, indexes: indexCount, fixed, ignored };
+}
+
+/** Every doc the checker reads (root, colocated CLAUDE.md, context/ topics and indexes). */
+export function corpusDocs(root: string, ignore?: string[]): string[] {
+  const isIgnored = makeIsIgnored(loadIgnore(root, ignore));
+  return walk(root, root, [], isIgnored, { files: 0, dirs: 0 }).filter((f) => {
+    const kind = classify(root, f);
+    return kind !== "skip" && kind !== "other";
+  });
 }
 
 export function loadIndexEntries(root: string): IndexEntry[] {

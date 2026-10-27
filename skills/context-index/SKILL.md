@@ -45,7 +45,7 @@ Curate the repo's lazy-loaded knowledge: a minimal root `CLAUDE.md`, one eager `
 Every always-loaded token competes with the task, and lazy files are only lazy if their triggers are narrow.
 
 - **Always loaded:** root `CLAUDE.md` + `context/index.md`, ~2.5k tokens combined. Every listed skill and workflow (Claude Code's `.claude/workflows/*.js` `meta.description` + `whenToUse`) also loads every session, at ~75 tokens per entry on top of its text: keep each under 500 chars and the whole listing under ~3k.
-- **Loaded on touch:** a colocated `<dir>/CLAUDE.md` loads together with every colocated CLAUDE.md above it. Keep each file under ~2.5k tokens and the whole stack under ~6k. When a file outgrows that, move runbook and reference detail into a `context/<topic>.md` behind a specific trigger - NOT into a deeper nested CLAUDE.md, which only lengthens the stack.
+- **Loaded on touch:** a colocated `<dir>/CLAUDE.md` loads together with every colocated CLAUDE.md above it. Keep each file under ~2.5k tokens and the whole stack under ~6k. When a file outgrows that, move runbook and reference detail into a `context/<topic>.md` behind a specific trigger - NOT into a deeper nested CLAUDE.md, which only lengthens the stack. Moving follows §Moving content.
 - **Loaded on match:** a topic doc under ~5k tokens. A doc with a broad trigger effectively loads every session - give it specific triggers or move its always-needed lines into `CLAUDE.md`.
 - **Loaded on invocation:** a SKILL.md loads whole, and only its first ~5k tokens survive a compaction. Put rules first; move reference detail into `references/`. A skill people start by hand should be hidden from the model where the agent supports it (e.g. Claude Code's `disable-model-invocation`), so its description stops loading every session.
 
@@ -67,7 +67,7 @@ Distill the current session into durable instructions.
 3. **Draft changes.** For each keeper: show the exact diff (append, edit, or new file) - including rung 1-2 code, script, and hook fixes in this repo, written per "Writing agent hooks". For a source fix on the user's own machine or agent config, draft the exact command or config line - it is applied on approval like any diff. For a fix owned by someone else, draft the change request (owner, file, change) and record it pending (`context-index ledger pending`). Present source fixes before any guard for the same failure; a guard over a fixable cause is interim and says so. For new topic docs: show the full file + the new index line. Name each prose keeper's load point and check it would be in context when the problem recurs (`references/reflect-heuristics.md` -> "Where it loads"). Anchor drift-prone state facts per `references/anchored-claims.md` - prefer `source:`/`invariant:`/`verify:` over dated prose.
 4. **Confirm.** Present all drafts in one batch (a structured multi-select question where the agent has one, e.g. Claude Code's `AskUserQuestion`). The user approves, edits, or rejects per item.
 5. **Apply.** Write approved changes. Scaffold new topic files with `context-index scaffold <name> "<Use-when trigger>"` - it wires the index entry, so don't hand-edit `context/index.md`.
-6. **Verify.** `@context/index.md` still imported; entries are bare paths with specific triggers; no universal content leaked into a topic doc; no topic content leaked into `CLAUDE.md`; nothing you appended pushed a file or stack over its load budget. Then run `context-index check` and resolve every error before declaring done.
+6. **Verify.** `@context/index.md` still imported; entries are bare paths with specific triggers; no universal content leaked into a topic doc; no topic content leaked into `CLAUDE.md`; nothing you appended pushed a file or stack over its load budget. Then run `context-index check` and resolve every error before declaring done. Fix drift warnings on lines you wrote: correct a dead path; replace a copied rule with a pointer.
 
 ## Subcommand: audit
 
@@ -75,9 +75,11 @@ Retroactively sweep the EXISTING corpus. `reflect` distills THIS session forward
 
 1. **Harvest footguns.** Run `context-index footguns --json`. It lists every documented footgun in four ranked categories: A invariant-without-guard (highest signal); D scriptable-procedure; B gotcha/pitfall sections; C hazard phrases ("silently", "passes ... but"). Read-only.
 2. **Harvest load cost.** Run `context-index check --json` and collect the load-cost warnings (`references/validation.md` -> Load cost): always-loaded layer, read-ahead directives, broad triggers, oversized colocated files and stacks, long packed lines, skill and workflow descriptions, SKILL.md bodies, the skill/workflow listing.
-3. **Triage.** Footguns go through "Prefer the fix over the note" (`references/reflect-heuristics.md`): (1) root-cause code fix, (2) harness check, or (3) an anchored doc when neither is feasible. Load-cost findings get a concrete trim: rewrite the directive, narrow the trigger, move named sections into a topic doc, shorten the description, split a SKILL.md into `references/`, or hide a hand-started skill from the model. Rank category A footguns and the always-loaded findings first.
-4. **Confirm.** Present ranked proposals in one batch with the evidence (`file:line` + excerpt, tokens before -> after). NEVER auto-apply - the user approves per item.
-5. **Apply approved, then verify.** Run `context-index check`; resolve every error before done.
+3. **Harvest drift.** From the same `check` run, collect dead paths and cross-doc duplicate sentences; add `check --symbols` (judge each - other systems' API names show up) and `verify --run` (`references/validation.md`). A duplicated rule keeps one home (§Moving content); the other copy becomes a pointer.
+4. **Triage.** Footguns go through "Prefer the fix over the note" (`references/reflect-heuristics.md`): (1) root-cause code fix, (2) harness check, or (3) an anchored doc when neither is feasible. Load-cost findings get a concrete trim: rewrite the directive, narrow the trigger, move named sections into a topic doc (§Moving content), shorten the description, split a SKILL.md into `references/`, or hide a hand-started skill from the model. Rank category A footguns and the always-loaded findings first.
+   Drift findings get the doc corrected against the code (`file:line` evidence), never a reworded copy.
+5. **Confirm.** Present ranked proposals in one batch with the evidence (`file:line` + excerpt, tokens before -> after). NEVER auto-apply - the user approves per item. If the skill was installed as a copy, not a Claude Code plugin, and `.claude/settings.json` lacks the `hooks/` hooks, propose wiring them (`hooks/README.md`) - the doc-edit hook checks the edits made with this skill not loaded.
+6. **Apply approved, then verify.** Run `context-index check`; resolve every error before done.
 
 ## Subcommand: setup
 
@@ -85,7 +87,7 @@ Refactor a project's CLAUDE.md into: minimal root, one eager index, on-demand to
 
 1. **Audit.** Read the existing `CLAUDE.md` and any `@import`s. Flag: contradictions (ask the user to resolve before continuing); filler (vague platitudes, tautologies, linter-handled rules, things Claude already knows); inlined domain content (auth, framework, schema deep dives belong in `context/<topic>.md`).
 2. **Create the index shell FIRST.** If `context/index.md` doesn't exist, write it with a `# Context index` title and this directive, and no entries: `IMPORTANT: Read an entry only when your task matches its "Use when". Don't read ahead.` `context-index scaffold` adds entries INTO an existing index and refuses without one.
-3. **Extract + index.** Move each domain section into `context/<topic>.md` with `context-index scaffold <topic> "<Use-when trigger>"`, then fill the body. Each file: self-contained, single-purpose, with a clear "when would I need this?" answer - if there isn't one, it shouldn't be its own file. See `references/topic-example.md`. Fold topic-specific keywords (frameworks, error codes, file patterns) into each trigger. A repo overview is not a topic: its few always-needed lines stay in `CLAUDE.md`, and the rest goes to docs with specific triggers.
+3. **Extract + index.** Move (never copy) each domain section into `context/<topic>.md` per §Moving content, with `context-index scaffold <topic> "<Use-when trigger>"`, then fill the body. Each file: self-contained, single-purpose, with a clear "when would I need this?" answer - if there isn't one, it shouldn't be its own file. See `references/topic-example.md`. Fold topic-specific keywords (frameworks, error codes, file patterns) into each trigger. A repo overview is not a topic: its few always-needed lines stay in `CLAUDE.md`, and the rest goes to docs with specific triggers.
 4. **Curate CLAUDE.md.** Structure per `references/claude-md-structure.md`: identity, commands, architecture sketch, workflow, constraints, `@context/index.md`. Flag bloat for removal; flag universal content that was mistakenly extracted.
 5. **Verify.** No contradictions; each topic doc self-contained; every entry has a specific trigger; all paths resolve; nothing at root would fire on "every task" only by accident. Run `context-index check` and resolve every error before declaring done.
 
@@ -108,8 +110,12 @@ If the best "Use when:" trigger you can write is "every task", "every commit", "
 **IMPORTANT: A colocated `<dir>/CLAUDE.md` is the default for directory-scoped rules.** Fall back to `context/<topic>.md` when the content is cross-cutting, or when it is long-form (runbooks, design rationale, reference tables) that only some tasks in that directory need.
 
 - Colocate rules that apply to files under one directory - a package, a service, `routes/auth/`, `scripts/`. Don't colocate content that references files outside the directory.
-- Before appending, check the file's size AND its stack (§Load budgets). Over budget -> move detail into a topic doc behind a specific trigger, leaving a one-line pointer.
+- Before appending, check the file's size AND its stack (§Load budgets). Over budget -> move detail into a topic doc behind a specific trigger, leaving a one-line pointer (§Moving content).
 - Colocated files auto-load when working in that subtree - they don't need an index entry.
+
+## Moving content
+
+Splitting a file to meet a budget is where duplicates and stale history are born. **Move, don't copy**: each rule ends in exactly one file, and the source keeps a one-line pointer. **Re-judge, don't relocate**: moved text passes the reflect Keep/Drop rules again - incident history, rollout and fix logs are dropped, not moved. Details: `references/moving-content.md`.
 
 ## Root-cause & harness fixes
 
@@ -121,15 +127,9 @@ Many "gotcha" candidates are better deleted than documented. Before drafting a d
 
 ## References
 
-- `references/validation.md` - what `check` catches (errors, warnings, load cost), `--fix`, `--quiet`, `.contextignore`
+- `references/validation.md` - what `check` catches (errors, warnings, load cost, drift), `--fix`, `--quiet`, `--file`, `--symbols`, `verify`, `.contextignore`
+- `hooks/README.md` - the optional Claude Code hooks (inject guidance on code edits; check a doc when it is edited)
 - `references/nested-indexes.md` - sub-indexes, `scaffold`, optional `paths:` activation, module recommendations
 - `references/claude-md-structure.md`, `references/formatting.md`, `references/topic-example.md` - shape and style
 - `references/anchored-claims.md` - `source:` > `invariant:`/`enforce:` > `verify:` > `stale-by:`
-
-## Hard rules (echo)
-
-- Root `CLAUDE.md` MUST import `@context/index.md`.
-- Index entries: bare paths + specific "Use when:" triggers; no read-ahead directives.
-- Budget loads in tokens: always-loaded ~2.5k, colocated ~2.5k per file and ~6k per stack, skill descriptions under 500 chars.
-- Never touch `CLAUDE.local.md`.
-- `context-index check` passes with zero errors before done.
+- `references/moving-content.md` - splitting a file without leaving copies or carrying history forward
